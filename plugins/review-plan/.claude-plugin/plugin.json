@@ -1,0 +1,11 @@
+{
+  "name": "review-plan",
+  "description": "Facilitates an automated plan review loop using parallel Claude reviewer agents, iterating on feedback until the plan is approved.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Adriel Frederick"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/adrielfrederick/claude-plugins",
+  "repository": "https://github.com/adrielfrederick/claude-plugins"
+}

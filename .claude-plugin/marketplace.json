@@ -1,0 +1,23 @@
+{
+  "name": "claude-plugins",
+  "description": "Claude Code plugins for automated plan and PR review workflows.",
+  "owner": {
+    "name": "Adriel Frederick"
+  },
+  "plugins": [
+    {
+      "name": "review-plan",
+      "description": "Automated plan review loop using parallel Claude reviewer agents.",
+      "source": "./plugins/review-plan",
+      "category": "development",
+      "homepage": "https://github.com/adrielfrederick/claude-plugins"
+    },
+    {
+      "name": "pr-review-loop",
+      "description": "Automated PR review loop using Codex reviewer agents. Requires the Codex CLI and gh.",
+      "source": "./plugins/pr-review-loop",
+      "category": "development",
+      "homepage": "https://github.com/adrielfrederick/claude-plugins"
+    }
+  ]
+}

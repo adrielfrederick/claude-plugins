@@ -1,0 +1,11 @@
+{
+  "name": "pr-review-loop",
+  "description": "Automated PR review loop — spawns Codex reviewer agents to review the current branch's open PR, then iterates with Claude addressing feedback until clean or limits hit. Requires the Codex CLI and the GitHub CLI on PATH.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Adriel Frederick"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/adrielfrederick/claude-plugins",
+  "repository": "https://github.com/adrielfrederick/claude-plugins"
+}
