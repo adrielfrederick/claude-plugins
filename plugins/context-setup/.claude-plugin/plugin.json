@@ -1,7 +1,7 @@
 {
   "name": "context-setup",
-  "description": "Bootstrap the vault-context client in any git repo — installs the package, writes config, wires a Stop hook + OS-appropriate scheduled task, gitignores the cache, and runs a cold-start fetch. Cross-platform (macOS/Linux/Windows).",
-  "version": "0.1.0",
+  "description": "Bootstrap the vault-context client in any git repo — installs the package, writes config, wires a Stop hook + an MCP scheduled routine, gitignores the cache, and runs a cold-start fetch.",
+  "version": "0.2.0",
   "author": {
     "name": "Adriel Frederick"
   },

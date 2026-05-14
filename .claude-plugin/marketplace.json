@@ -21,7 +21,7 @@
     },
     {
       "name": "context-setup",
-      "description": "Bootstrap the vault-context client in any git repo — config, Stop hook, cross-platform scheduled task, gitignore, cold-start fetch.",
+      "description": "Bootstrap the vault-context client in any git repo — config, Stop hook, MCP scheduled routine, gitignore, cold-start fetch.",
       "source": "./plugins/context-setup",
       "category": "development",
       "homepage": "https://github.com/adrielfrederick/claude-plugins"
