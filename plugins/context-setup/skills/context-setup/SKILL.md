@@ -19,12 +19,19 @@ synthesis. The full design lives in
 4. **Confirm `vault-context` is installed:**
    `python3 -c "import vault_context; print(vault_context.__version__)"`. If
    the import fails, install:
-   - **Laptop (macOS):** `pip install -e ~/dev/vault-bot/vault-context`.
-   - **Linux / headless:** same as macOS if vault-bot repo is checked out.
-   - **PC (Windows):** copy the wheel built at
-     `~/dev/vault-bot/vault-context/dist/vault_context-0.1.0-py3-none-any.whl`
-     to the PC (e.g. via OneDrive, scp, or USB), then
-     `py -m pip install C:\path\to\vault_context-0.1.0-py3-none-any.whl`.
+   - **Laptop (macOS) / Linux dev machine** (vault-bot repo checked out):
+     `pip install -e ~/dev/vault-bot/vault-context`.
+   - **Any other machine** (PC, fresh laptop — no vault-bot checkout): install
+     straight from the server, which hosts the built wheel. No file copying:
+     ```
+     curl -L -o vault_context.whl <server-url>/api/context/client-wheel
+     pip install vault_context.whl
+     ```
+     PowerShell alternative to `curl`:
+     `Invoke-WebRequest <server-url>/api/context/client-wheel -OutFile vault_context.whl`.
+     The `<server-url>` is the same base URL you'll enter in Step 1; the
+     `/api/context/client-wheel` endpoint is unauthenticated, so this works
+     before the bearer token is configured.
 
 ## Step 1 — Slug + server config
 
