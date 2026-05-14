@@ -18,22 +18,32 @@ synthesis. The full design lives in
 3. **Detect OS:** uname → darwin / linux / windows. Used only for
    session-source path detection in Step 2 — the scheduled routine itself is
    OS-independent (it's an MCP task, not a launchd/cron/schtasks entry).
-4. **Confirm `vault-context` is installed:**
-   `python3 -c "import vault_context; print(vault_context.__version__)"`. If
-   the import fails, install:
+4. **Install or refresh `vault-context`.** The bug fixes ship in the
+   *package*, not this skill — so a stale install must be **refreshed**, not
+   just absence handled. Run the install step **unconditionally**; do NOT gate
+   it on whether `import vault_context` currently succeeds (a machine with an
+   old build imports fine but still needs the update).
    - **Laptop (macOS) / Linux dev machine** (vault-bot repo checked out):
-     `pip install -e ~/dev/vault-bot/vault-context`.
+     `git -C ~/dev/vault-bot pull` then `pip install -e ~/dev/vault-bot/vault-context`.
+     The editable install reflects the repo, so it's current after the pull.
    - **Any other machine** (PC, fresh laptop — no vault-bot checkout): install
-     straight from the server, which hosts the built wheel. No file copying:
+     from the server-hosted wheel, `--force-reinstall` so a previously
+     installed older build is actually replaced (plain `pip install` would
+     skip it as "already satisfied" whenever the version string matches):
      ```
      curl -L -o vault_context.whl <server-url>/api/context/client-wheel
-     pip install vault_context.whl
+     pip install --force-reinstall vault_context.whl
      ```
      PowerShell alternative to `curl`:
      `Invoke-WebRequest <server-url>/api/context/client-wheel -OutFile vault_context.whl`.
      The `<server-url>` is the same base URL you'll enter in Step 1; the
      `/api/context/client-wheel` endpoint is unauthenticated, so this works
      before the bearer token is configured.
+   Then confirm the version landed:
+   `python3 -c "import vault_context; print(vault_context.__version__)"` —
+   expect **0.2.0 or newer**. An older number means the install resolved to a
+   different Python environment than the one on PATH — sort that out before
+   continuing, or the Stop hook and routine will run the stale build.
 
 ## Step 1 — Slug + server config
 
