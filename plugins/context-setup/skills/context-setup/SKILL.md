@@ -1,6 +1,6 @@
 ---
 name: context-setup
-description: Bootstrap the vault-context client in the current repo — install package if missing, create config, wire Stop hook + scheduled task, gitignore + cold-start fetch. Cross-platform (macOS/Linux/Windows). User-invoked via /context-setup.
+description: Bootstrap the vault-context client in the current repo — install package if missing, create config, wire a Stop hook + an MCP scheduled routine, gitignore + cold-start fetch. User-invoked via /context-setup.
 ---
 
 # /context-setup
@@ -15,7 +15,9 @@ synthesis. The full design lives in
 1. **`pwd`** — confirm the current directory.
 2. **Check it's a git repo:** `git rev-parse --show-toplevel`. If not, refuse:
    "vault-context requires a git repo; run `git init` first."
-3. **Detect OS:** uname → darwin / linux / windows (Cygwin/Git-Bash all map to windows for scheduling).
+3. **Detect OS:** uname → darwin / linux / windows. Used only for
+   session-source path detection in Step 2 — the scheduled routine itself is
+   OS-independent (it's an MCP task, not a launchd/cron/schtasks entry).
 4. **Confirm `vault-context` is installed:**
    `python3 -c "import vault_context; print(vault_context.__version__)"`. If
    the import fails, install:
@@ -105,6 +107,7 @@ Append (if not already present) to `<repo-root>/.gitignore`:
 ```
 .claude/vault-context.yaml
 .claude/.vault-context-debounce
+.claude/.vault-context-state-marker
 docs/sessions/
 ```
 
@@ -132,21 +135,43 @@ Append to `<repo-root>/.claude/settings.json` (create if missing):
 
 The Stop hook respects `DEBOUNCE_SECONDS` (config default 1800).
 
-## Step 6 — Scheduled task
+## Step 6 — Scheduled routine (MCP)
 
-3× / day cron equivalent (different file per OS):
+Create an MCP scheduled task (the `scheduled-tasks` server) that runs
+`vault-context refresh` 3× / day. This replaces the old per-OS
+launchd / cron / schtasks path: MCP routines run anywhere Claude Code runs,
+and they're observable + debuggable via `list_scheduled_tasks` (last run,
+next run, enabled state).
 
-- **macOS (launchd):** write
-  `~/Library/LaunchAgents/com.adriel.vault-context.<slug>.plist` via
-  `python3 -c "from vault_context.scheduler import launchd; launchd.install('<slug>-write', ['vault-context', 'write-gist', '--config', '<abs path>'], 28800)"`
-  (interval seconds = 8h, so 3× / day).
-- **Linux (cron):** fragment file via
-  `python3 -c "from vault_context.scheduler import cron; cron.install('<slug>-write', [...])"`.
-  Concatenate fragments under `~/.config/vault-context/cron-fragments/` to
-  build `crontab -l > /tmp/ctab && cat ~/.config/vault-context/cron-fragments/*.cron >> /tmp/ctab && crontab /tmp/ctab`.
-- **Windows (Task Scheduler):** `.cmd` script via
-  `python3 -c "from vault_context.scheduler import schtasks; schtasks.install(...)"`.
-  Run the generated `.cmd` once to register the task.
+Call `create_scheduled_task` with:
+
+- **taskId:** `<slug>-context` (e.g. `f1-predictions-context`)
+- **description:** `vault-context refresh for <slug> — session gists + once/day state refresh`
+- **cronExpression:** `0 11,17,22 * * *` — the `scheduled-tasks` server
+  evaluates cron in the user's **local** timezone, so this is 11:00 / 17:00 /
+  22:00 PT directly; no UTC conversion.
+- **prompt:** keep it THIN. All real logic lives in the versioned
+  `vault-context` package — the (unversioned) task SKILL.md is just a shim:
+
+  ```
+  Run this command via the Bash tool, then report its stdout, stderr, and
+  exit code:
+
+  vault-context refresh --config <ABSOLUTE-path-to-.claude/vault-context.yaml>
+
+  This is the scheduled context-sync routine for <slug>: it writes session
+  gists for ended Claude Code sessions and, at most once per local day,
+  refreshes the project's state.md. Do nothing else. A nonzero exit code
+  means some POSTs failed — surface it plainly; the routine self-heals on
+  the next fire.
+  ```
+
+`create_scheduled_task` shows the user an approval prompt — that is the
+confirmation step; go ahead and call it.
+
+**`vault-context` must be on PATH for the MCP task's Bash environment.** If
+`which vault-context` from a plain shell doesn't resolve, use the absolute
+path (e.g. `~/.local/bin/vault-context`) in the prompt instead.
 
 ## Step 7 — Cold-start fetch
 
@@ -187,8 +212,9 @@ Print:
    Cache:    <repo>/docs/sessions (gitignored)
    Server:   <url>
    Hooks:    Stop hook → write-gist (debounced 30min)
-   Schedule: 3× / day write-gist via <launchd|cron|schtasks>
-   Next:     daily-state on next scheduled tick
+   Routine:  MCP task <slug>-context → vault-context refresh, 11/17/22 PT
+   Next:     refresh runs at the next scheduled tick (write-gist every fire,
+             daily-state once per local day)
 ```
 
 ## Guardrails
