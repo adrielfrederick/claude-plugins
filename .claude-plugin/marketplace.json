@@ -1,6 +1,6 @@
 {
-  "name": "claude-plugins",
-  "description": "Claude Code plugins for automated review workflows and cross-repo context tooling.",
+  "name": "adrielfrederick-plugins",
+  "description": "Plugins for automated review workflows and cross-repo context tooling.",
   "owner": {
     "name": "Adriel Frederick"
   },
