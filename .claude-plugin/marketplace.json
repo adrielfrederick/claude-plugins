@@ -1,6 +1,6 @@
 {
   "name": "claude-plugins",
-  "description": "Claude Code plugins for automated plan and PR review workflows.",
+  "description": "Claude Code plugins for automated review workflows and cross-repo context tooling.",
   "owner": {
     "name": "Adriel Frederick"
   },
@@ -16,6 +16,13 @@
       "name": "pr-review-loop",
       "description": "Automated PR review loop using Codex reviewer agents. Requires the Codex CLI and gh.",
       "source": "./plugins/pr-review-loop",
+      "category": "development",
+      "homepage": "https://github.com/adrielfrederick/claude-plugins"
+    },
+    {
+      "name": "context-setup",
+      "description": "Bootstrap the vault-context client in any git repo — config, Stop hook, cross-platform scheduled task, gitignore, cold-start fetch.",
+      "source": "./plugins/context-setup",
       "category": "development",
       "homepage": "https://github.com/adrielfrederick/claude-plugins"
     }

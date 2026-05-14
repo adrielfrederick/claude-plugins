@@ -1,0 +1,198 @@
+---
+name: context-setup
+description: Bootstrap the vault-context client in the current repo — install package if missing, create config, wire Stop hook + scheduled task, gitignore + cold-start fetch. Cross-platform (macOS/Linux/Windows). User-invoked via /context-setup.
+---
+
+# /context-setup
+
+You are bootstrapping the **vault-context** client in the user's current git repo.
+The client posts session gists to the vault-bot server and pulls state-block
+synthesis. The full design lives in
+`/Users/adriel/Adriel Vault/01-Active/07 - Context System/Unified Morning Workflow Plan 2026-05-13.md`.
+
+## Pre-flight
+
+1. **`pwd`** — confirm the current directory.
+2. **Check it's a git repo:** `git rev-parse --show-toplevel`. If not, refuse:
+   "vault-context requires a git repo; run `git init` first."
+3. **Detect OS:** uname → darwin / linux / windows (Cygwin/Git-Bash all map to windows for scheduling).
+4. **Confirm `vault-context` is installed:**
+   `python3 -c "import vault_context; print(vault_context.__version__)"`. If
+   the import fails, install:
+   - **Laptop (macOS):** `pip install -e ~/dev/vault-bot/vault-context`.
+   - **Linux / headless:** same as macOS if vault-bot repo is checked out.
+   - **PC (Windows):** copy the wheel built at
+     `~/dev/vault-bot/vault-context/dist/vault_context-0.1.0-py3-none-any.whl`
+     to the PC (e.g. via OneDrive, scp, or USB), then
+     `py -m pip install C:\path\to\vault_context-0.1.0-py3-none-any.whl`.
+
+## Step 1 — Slug + server config
+
+Ask the user:
+
+```
+Project slug for this repo? (suggested from dirname: <basename>)
+```
+
+Validate against the allowlist `^[a-z0-9][a-z0-9-]{0,63}$`. Re-prompt if invalid.
+
+Ask:
+
+```
+Server URL? (default: https://<production-base-url>)
+```
+
+Ask:
+
+```
+Bearer token? (will be stored via `keyring` if available, else CONTEXT_API_TOKEN env var.
+Generate fresh: `openssl rand -hex 32`)
+```
+
+Persist the token:
+
+```bash
+python3 -c "from vault_context.secrets import set_token_in_keyring; set_token_in_keyring('<token>')"
+```
+
+If `keyring` raises on import (headless Linux), echo a one-liner the user
+should add to their shell rc:
+
+```bash
+export CONTEXT_API_TOKEN='<token>'
+```
+
+## Step 2 — Cache + session source
+
+`docs/sessions/` is the default cache directory inside the repo. If
+`docs/` does NOT exist, ask the user where the cache should live; default
+to `.vault-context/sessions/` if they decline `docs/`.
+
+For session-source detection (writes-the-gist branch):
+
+- macOS / Linux: `~/.claude/projects/-<encoded-repo-path>/` is the JSONL
+  source. Verify it exists with `ls`. If absent, run the helper:
+  `python3 -c "from pathlib import Path; print(Path.home() / '.claude' / 'projects' / '-' + str(Path.cwd()).replace('/', '-'))"`.
+- Windows: `%LOCALAPPDATA%\AnthropicClaude\claude\projects\-<encoded>`.
+
+Some repos won't have session JSONLs (e.g. shared/CI-only). For those, leave
+`session_jsonl_dir` unset; the daily-state fetch will still work.
+
+## Step 3 — Write `.claude/vault-context.yaml`
+
+```yaml
+project_slug: <slug>
+server_url: <url>
+cache_dir: docs/sessions
+session_jsonl_dir: <abs path>
+debounce_seconds: 1800
+lookback_hours: 48
+```
+
+Path: `<repo-root>/.claude/vault-context.yaml`.
+
+## Step 4 — Gitignore
+
+Append (if not already present) to `<repo-root>/.gitignore`:
+
+```
+.claude/vault-context.yaml
+.claude/.vault-context-debounce
+docs/sessions/
+```
+
+If any of these files already exist tracked, run
+`git rm --cached -r <path>` first so the gitignore takes effect.
+
+## Step 5 — Stop hook
+
+Append to `<repo-root>/.claude/settings.json` (create if missing):
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "vault-context write-gist --config ${CLAUDE_PROJECT_DIR}/.claude/vault-context.yaml" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The Stop hook respects `DEBOUNCE_SECONDS` (config default 1800).
+
+## Step 6 — Scheduled task
+
+3× / day cron equivalent (different file per OS):
+
+- **macOS (launchd):** write
+  `~/Library/LaunchAgents/com.adriel.vault-context.<slug>.plist` via
+  `python3 -c "from vault_context.scheduler import launchd; launchd.install('<slug>-write', ['vault-context', 'write-gist', '--config', '<abs path>'], 28800)"`
+  (interval seconds = 8h, so 3× / day).
+- **Linux (cron):** fragment file via
+  `python3 -c "from vault_context.scheduler import cron; cron.install('<slug>-write', [...])"`.
+  Concatenate fragments under `~/.config/vault-context/cron-fragments/` to
+  build `crontab -l > /tmp/ctab && cat ~/.config/vault-context/cron-fragments/*.cron >> /tmp/ctab && crontab /tmp/ctab`.
+- **Windows (Task Scheduler):** `.cmd` script via
+  `python3 -c "from vault_context.scheduler import schtasks; schtasks.install(...)"`.
+  Run the generated `.cmd` once to register the task.
+
+## Step 7 — Cold-start fetch
+
+Pull existing gists from the server so the local cache mirrors canonical:
+
+```
+vault-context fetch --config <repo>/.claude/vault-context.yaml
+```
+
+## Step 8 — Migrate existing gists (if any)
+
+If the repo already had `docs/sessions/*.md` (e.g. f1-predictions):
+
+```
+vault-context migrate --config <abs path> --dry-run
+```
+
+Show the plan. Confirm. Then run without `--dry-run`. Files unchanged in
+their content; only frontmatter mutates to add `synced_at`.
+
+## Step 9 — Dry-run daily-state (only for repos with session source)
+
+```
+vault-context daily-state --config <abs path>
+```
+
+Show the proposed state block (server prints what was POSTed). Ask
+"looks reasonable?" before confirming. If the user says no, undo by deleting
+`<vault>/Project Summaries/<slug>/state.md`.
+
+## Step 10 — Install summary
+
+Print:
+
+```
+✅ vault-context installed for <slug>
+   Config:   <repo>/.claude/vault-context.yaml
+   Cache:    <repo>/docs/sessions (gitignored)
+   Server:   <url>
+   Hooks:    Stop hook → write-gist (debounced 30min)
+   Schedule: 3× / day write-gist via <launchd|cron|schtasks>
+   Next:     daily-state on next scheduled tick
+```
+
+## Guardrails
+
+- **Never commit the token** — keyring or env-var only.
+- **Never overwrite an existing `.claude/settings.json`** — read, splice, write.
+- **Never run destructive `git` ops** without confirmation; `git rm --cached`
+  is the only one this skill should ever need.
+- **If the user already ran context-setup once on this repo** (config exists),
+  default to "update mode": offer to refresh the token, re-validate the
+  schedule, or re-run the cold-start fetch. Don't blow away the existing
+  config.
+- **If the server URL is unreachable** (curl health probe fails), warn but
+  don't refuse — the user may be offline and want to set up first.
