@@ -230,7 +230,7 @@ If code is already clean: "Code is clean — no simplification needed."
 Read-only sandbox: do NOT run tests, lint, or builds. Targeted `rg` is fine.
 ```
 
-## failure-pattern-analyst (read-only sandbox, mini)
+## failure-pattern-analyst (read-only sandbox)
 
 ```
 If `failure-patterns.md` is not present in the packet, output exactly "No

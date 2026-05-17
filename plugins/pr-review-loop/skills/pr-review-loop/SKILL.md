@@ -139,7 +139,7 @@ Never omit agents within a tier. Each catches a different class of issue.
 | type-design-analyzer | gpt-5.4-mini | `-s read-only` | medium | none |
 | comment-analyzer | gpt-5.4-mini | `-s read-only` | low | none |
 | code-simplifier | gpt-5.4-mini | `-s read-only` | low | none |
-| failure-pattern-analyst | gpt-5.4-mini | `-s read-only` | low | none |
+| failure-pattern-analyst | (default) | `-s read-only` | medium | none |
 
 Reasoning is controlled via the `-c` config override flag with these keys:
 - `-c model_reasoning_summary=concise` — minimizes "thinking" summary blocks (API accepts `concise`, `detailed`, or `auto`; `none` is rejected). `concise` reduced per-agent token cost ~25% vs the `auto` default in prior runs.
@@ -163,7 +163,7 @@ Where for each agent:
 - `type-design-analyzer`: `SANDBOX="-s read-only"`, `MODEL_FLAG="-m gpt-5.4-mini"`, `EFFORT=medium`
 - `comment-analyzer`: `SANDBOX="-s read-only"`, `MODEL_FLAG="-m gpt-5.4-mini"`, `EFFORT=low`
 - `code-simplifier`: `SANDBOX="-s read-only"`, `MODEL_FLAG="-m gpt-5.4-mini"`, `EFFORT=low`
-- `failure-pattern-analyst`: `SANDBOX="-s read-only"`, `MODEL_FLAG="-m gpt-5.4-mini"`, `EFFORT=low`
+- `failure-pattern-analyst`: `SANDBOX="-s read-only"`, `MODEL_FLAG=`, `EFFORT=medium`
 
 **CRITICAL: After the first agent finishes, check its session header** (first ~10 lines of output) to verify `reasoning effort` and `reasoning summaries` show the intended values, not defaults. If they show `high`/`auto`, stop and debug the `-c` flags before launching more agents.
 
