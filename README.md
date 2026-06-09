@@ -39,7 +39,7 @@ Updates are pull-based:
 
 Once installed, invoke the slash commands directly:
 
-- `/review-plan <path-to-plan.md>` — runs the plan through the review loop. Saves the plan to `docs/plans/` and creates a companion `<plan>-review.md` review conversation document.
+- `/review-plan <path-to-plan.md>` — runs the plan through the review loop. Saves the plan to `docs/plans/` and creates a companion `<plan>-review.md` review conversation document. Enforces a plan contract (since 0.2.0): every plan must end with `## Operator forks` (the few decisions only the human can make, presented for resolution at wrap-up — options + recommendation each) and `## Live gates` (steps touching real money / prod data / irreversible effects, each with its operator validation); reviewers flag missing sections, evidence-resolvable forks, and uncovered gates.
 - `/pr-review-loop` — runs the loop against the current branch's open PR (use `/pr-review-loop verbose` to post each round to the PR; default is a single summary at loop end). Requires an open PR on the current branch.
 - `/context-setup` — run inside a git repo to wire it into the vault-context system. Prompts for the project slug, server URL, and token, then writes config + hooks + a scheduled task and does a cold-start fetch. Run again later in "update mode" to refresh the token or re-validate the schedule.
 

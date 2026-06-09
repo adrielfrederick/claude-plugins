@@ -7,6 +7,10 @@ After a plan is created:
 
 1. **Save the plan to the repo**: Copy the plan document to `<repo-root>/docs/plans/` with a descriptive filename (e.g., `docs/plans/auth-redesign.md`). Resolve the repo root by running `git rev-parse --show-toplevel`.
 
+   **Enforce the plan contract before starting the loop.** The plan document must end with two sections (add them if missing; an empty section must say `None` explicitly):
+   - `## Operator forks` — the few genuine decisions only the human operator can make (scope cuts, product shape, risk tolerance). Each fork lists the options and a recommendation. Anything resolvable by evidence, code inspection, or existing convention must be decided in the plan body instead of deferred here.
+   - `## Live gates` — every execution step that touches real money, production data/config, or irreversible external effects (payments, orders, emails, deletions), each paired with its concrete operator validation (e.g., dry-run output review, supervised small-stakes test, prod read-back).
+
 2. **Create a review conversation document**: Create a companion file at the same path with a `-review` suffix (e.g., `docs/plans/auth-redesign-review.md`). Start it with:
    - `Plan: <relative-path-to-plan>` (e.g., `Plan: docs/plans/auth-redesign.md`)
    - `Review Status: In Progress`
@@ -105,7 +109,7 @@ After a plan is created:
 
 ---
 
-10. **Wrap up**: Update the review document — change the header to `Review Status: Complete`. Notify the user that the review loop is finished and summarize the key changes made during the review.
+10. **Wrap up**: Update the review document — change the header to `Review Status: Complete`. Notify the user that the review loop is finished and summarize the key changes made during the review. Then present the plan's **Operator forks** to the user for resolution — options plus your recommendation for each, not the whole plan. Record the resolutions in the plan's decisions log. The plan is build-ready (`planned` in repos using roadmap tags) only once all forks are resolved.
 
 ---
 
@@ -150,6 +154,7 @@ Focus exclusively on whether the plan covers its implementation scope end-to-end
 - Are setup, cleanup, environment variables, dependencies, and configuration changes covered?
 - Are ownership boundaries clear — does the plan specify what belongs to backend, frontend, data, infra?
 - If the project has sprint/variant paths (e.g., mobile vs desktop, standard vs premium), are all variants covered?
+- Does the plan end with `## Operator forks` and `## Live gates` sections? Flag if either is missing. Flag any fork that is actually resolvable by evidence or existing convention (the author should decide it, not defer it to the operator). Flag any step touching real money, production data/config, or irreversible external effects that is absent from Live gates.
 
 Be direct and actionable. Separate blocking concerns from minor follow-ups. Prefer concrete examples over generic criticism. Verify your claims against the actual codebase.
 ```
@@ -255,6 +260,7 @@ Additionally, look for:
 - Issues introduced by the author's revisions in response to prior feedback
 - Inconsistencies between different parts of the plan
 - Whether pushed-back items from prior rounds deserve reconsideration
+- Whether `## Operator forks` defers decisions the author could resolve from evidence, and whether `## Live gates` covers every money/prod-touching step
 
 Also consider any feedback from the failure-pattern-analyst when forming your holistic verdict.
 
