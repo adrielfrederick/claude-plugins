@@ -16,17 +16,25 @@ Captures a Claude Code session as a dated markdown gist in the current repo's `d
 
 ## Workflow
 
-### 1. Determine the repo
+### 1. Determine the repo (write to the MAIN working tree, not a worktree)
 
-Use `git rev-parse --show-toplevel` to find the repo root for the current cwd. If it fails (not in a git repo), tell the user and stop — `/recap` is only for tracked repos.
+Find the repo root for the current cwd with `git rev-parse --show-toplevel`. If it fails (not in a git repo), tell the user and stop — `/recap` is only for tracked repos.
 
-If the repo root is `~/Adriel Vault`, that's fine — session gists for vault-level work go in `~/Adriel Vault/docs/sessions/` (create the folder if it doesn't exist; we're establishing the convention).
+**Then resolve the durable base path.** If `/recap` is invoked from a linked git worktree, the gist must NOT land under the worktree — when the worktree is torn down, the gist goes with it. Always write to the MAIN working tree instead. Compute it:
+
+```bash
+git worktree list --porcelain | sed -n 's/^worktree //p' | head -1
+```
+
+`git worktree list` always lists the main working tree first, so this returns its path even when you're standing inside a linked worktree — and returns the repo root unchanged when you're *not* in a worktree, so it's safe to run unconditionally. It also handles paths with spaces (e.g. `~/Adriel Vault`). Call this path **`base`** and use it as the root for everything below: the `docs/sessions/` location AND the `repo` frontmatter basename. (Edge case: if `git worktree list` shows the main tree as `(bare)` — no working tree — fall back to `--show-toplevel` and warn the user the gist may be ephemeral.)
+
+If `base` is `~/Adriel Vault`, that's fine — session gists for vault-level work go in `~/Adriel Vault/docs/sessions/` (create the folder if it doesn't exist; we're establishing the convention).
 
 ### 2. Ensure the sessions directory
 
-**Resolving the path depends on which repo you're in:**
+**Resolving the path depends on which repo you're in** (always rooted at `base`, the main working tree from step 1 — never the worktree's `--show-toplevel`):
 
-- **Code repos (e.g. `~/dev/f1-predictions`, `~/dev/unfurl`, or any `~/dev/*`):** `<repo_root>/docs/sessions/`. Create it if missing — `docs/sessions/` is the agreed idiomatic location.
+- **Code repos (e.g. `~/dev/f1-predictions`, `~/dev/unfurl`, or any `~/dev/*`):** `<base>/docs/sessions/`. Create it if missing — `docs/sessions/` is the agreed idiomatic location.
 - **The vault (`~/Adriel Vault`):** The vault structure doesn't use a top-level `docs/` folder. Session gists for vault meta-work (context system, vault maintenance, note organization) go in `01-Active/07 - Context System/sessions/`. If the session was clearly about a different vault project (e.g. a deep SBA strategy session), ask the user whether they want the gist in that project's folder (`01-Active/0X - Project/sessions/`) or in the general Context System folder.
 - **Other repos:** If there's no existing `docs/` convention and it's not the vault, ask the user where session gists should live.
 
@@ -87,7 +95,7 @@ If the user wants to edit before writing (infer from their tone or ask if unsure
 ---
 session_id: <value of $CLAUDE_CODE_SESSION_ID, full id>
 date: YYYY-MM-DD
-repo: <repo-name-from-git-root-basename>
+repo: <basename of `base` — the main working tree from step 1, not the worktree dir>
 slug: <slug>
 shape: <one of: research, drafting, notes-processing, planning, vault-hygiene, personal, project-work>
 ---
@@ -149,6 +157,7 @@ You: detect repo → grab session_id → classify shape → use provided slug �
 ## What NOT to do
 
 - Don't write the gist to the vault when you're in a code repo (wrong tier — gists are in-repo for execution detail; the vault gets summarized snapshots pushed from routines).
+- **Don't write the gist inside a git worktree.** If invoked from a linked worktree, resolve the main working tree (`base`, step 1) and write there — a gist under a worktree is lost when the worktree is removed, which defeats the whole point of a checkpoint.
 - Don't paste the raw transcript. This is a synthesis, not a log.
 - Don't use relative dates anywhere.
 - Don't skip the "Dead ends" section if there were any — that's the whole point.
