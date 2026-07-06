@@ -115,6 +115,16 @@ launch() {
   sandbox="${cfg%%|*}"; cfg="${cfg#*|}"
   model="${cfg%%|*}"; effort="${cfg##*|}"
 
+  # Locked-down CI containers (e.g. an unprivileged Railway runner) can't create
+  # the user namespaces Codex's bubblewrap/landlock sandbox needs, so every
+  # codex exec fails at sandbox setup. When the host signals this via
+  # CODEX_SANDBOX_UNAVAILABLE, bypass the OS sandbox + approvals for every agent.
+  # Safe only because such a runner is a throwaway container (the container is
+  # the sandbox) reviewing trusted same-repo PRs. See SKILL.md Phase 1 Step 4.
+  if [ -n "${CODEX_SANDBOX_UNAVAILABLE:-}" ]; then
+    sandbox="--dangerously-bypass-approvals-and-sandbox"
+  fi
+
   # shellcheck disable=SC2086  # sandbox/model are intentional multi-token flags
   codex exec $sandbox $model \
     -c model_reasoning_summary=concise \

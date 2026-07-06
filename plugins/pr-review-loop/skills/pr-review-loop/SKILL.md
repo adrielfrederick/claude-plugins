@@ -23,6 +23,17 @@ Every design decision — when to stop, what severity bar to apply, which agents
 
 Set `QUIET_MODE=true` unless `verbose` is in `$ARGUMENTS`. Tell the user which mode is active.
 
+## Runtime: drive the whole loop within one turn
+
+You may be running non-interactively under `claude --print` (e.g. a self-hosted
+CI runner triggered by a label). In that mode **there is no turn resumption and
+no scheduled wakeup — you are never re-invoked after you stop.** So you must
+carry every phase to completion within a single turn: never launch background
+work and then stop/yield to "wait" for it to finish and resume you. Anything you
+background is orphaned and killed the moment you stop, and the loop dies silently
+with no summary. Block on long-running work **inline** instead (see Phase 1
+Step 4). This is also correct interactively — it just matters most here.
+
 ## Phase 0: Setup
 
 **Preflight — required CLIs.** Before anything else, verify the external CLIs this skill shells out to are on PATH:
@@ -226,9 +237,17 @@ AGENT_TIMEOUT_SECONDS=$AGENT_TIMEOUT_SECONDS \
 
 The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent in parallel each under a watchdog, `wait`s, and writes `$ROUND_DIR/.done`. It runs the **core tier unconditionally** and refuses to `--skip` a core agent. `--sfh-effort medium` once `CONSECUTIVE_CLEAN_ROUNDS ≥ 1` (after a clean round the deep error-path trace rarely surfaces anything new); `high` otherwise.
 
+**Sandbox availability (locked-down containers).** If the environment variable `CODEX_SANDBOX_UNAVAILABLE` is set, `launch-agents.sh` overrides **every** agent's sandbox to `--dangerously-bypass-approvals-and-sandbox` (ignoring the per-role sandbox in its `role_config`). Some environments — notably unprivileged CI containers (e.g. a Railway-hosted self-hosted runner) — can't create the user namespaces Codex's `bubblewrap`/`landlock` sandbox needs, so **every** `codex exec` fails at sandbox setup (`Permission denied` creating a namespace) and the agents review nothing. (With the agent-failure detection in Step 5 these now surface as `AGENT_FAILED` rather than an ungrounded false-clean — but the round still does no real review, so the bypass is what lets it actually run.) Bypassing runs Codex with no OS sandbox and no approval prompts — acceptable **only** because such a runner is itself a locked-down, single-purpose, throwaway container (the container is the sandbox) reviewing trusted, same-repo PRs. When the var is unset (local/interactive), the per-role sandboxes apply unchanged so real sandboxing is in force. Export it before the `$LAUNCH_AGENTS` call:
+
+```bash
+[ -n "${CODEX_SANDBOX_UNAVAILABLE:-}" ] && export CODEX_SANDBOX_UNAVAILABLE   # the script reads it
+```
+
 **CRITICAL: After the first agent finishes, check its session header** — `head` the corresponding `$ROUND_DIR/log-<role>.txt` (first ~10 lines) and verify `reasoning effort` and `reasoning summaries` show the intended values, not defaults. If they show `high`/`auto` when you asked for something else, stop and debug the codex `-c` flags / CLI version before trusting the round. (On the runner the codex CLI can drift ahead of the laptop's — this check is the canary.)
 
 **Watchdog rationale (why the script wraps each agent in a deadline poll):** codex has no reliable internal wall cap, and the loop-level `TIMEOUT_SECONDS=3600` is checked only *between* rounds (Phase 4) — it cannot interrupt a round that is currently hung. Log analysis found the median agent finishes in 2–10 min, but a handful of rounds ran **28–167 minutes** because codex sat in API-degradation/network backoff (or the laptop slept mid-run); token counts were normal, so the time was pure stall — and those tails were ~⅔ of all review-loop wall time. The per-agent deadline `AGENT_TIMEOUT_SECONDS` (default 900s) sits far above every legitimate agent and far below every observed stall. The poll is **deadline-based, not `sleep N && kill`** (a sleep timer is itself suspended on machine sleep and would never fire; a deadline poll compares wall-clock each tick and kills on the first tick after wake) — this guards server-side network stalls on the runner as well as laptop sleep. A watchdog-killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-<role>.txt`; Step 5 treats that as "no findings this round."
+
+**Run `$LAUNCH_AGENTS` as ONE foreground bash call**, with a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS` (the CI runner sets a high `BASH_DEFAULT_TIMEOUT_MS` for this). The script blocks internally — it launches the batch, then `wait`s until every codex PID has completed or been watchdog-killed, then writes `$ROUND_DIR/.done` — so the whole round stays inside one turn. **Do NOT** background the launch and then stop/yield to "wait" for it: per the Runtime note above, a non-interactive `claude --print` run is never resumed, so a backgrounded batch is orphaned and killed the instant you stop and the loop dies with no summary. (If a single call would exceed your bash tool-timeout, poll in-turn instead: start `$LAUNCH_AGENTS` `nohup`-detached, then loop short `sleep`+check bash calls until `$ROUND_DIR/.done` exists — still never yielding the turn.)
 
 **Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — exit the loop with status `CODEX_DEGRADED` and tell the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
 

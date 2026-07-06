@@ -131,6 +131,24 @@ bash "$BUILD" --packet "$PKAMP" --out "$RDamp" --roles code-reviewer >/dev/null
 check "ampersand path substituted literally" 'grep -qF "$PKAMP/" "$RDamp/prompt-code-reviewer.txt"'
 check "no corrupted placeholder remains"     '! grep -q "{PACKET_PATH}" "$RDamp/prompt-code-reviewer.txt"'
 
+echo "== CODEX_SANDBOX_UNAVAILABLE bypass =="
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
+[ -n "$out" ] && echo "No issues found." > "$out"
+printf '%s\n' "$*" >> "$SANDBOX_TRACE"
+FAKE
+chmod +x "$BIN/codex"
+RDsb="$WORK/run-sandbox"; mkdir -p "$RDsb"; mkprompts "$RDsb" "${ALL[@]}"
+export SANDBOX_TRACE="$WORK/sandbox-trace.txt"; : > "$SANDBOX_TRACE"
+PATH="$BIN:$PATH" CODEX_SANDBOX_UNAVAILABLE=1 bash "$LAUNCH" --run-dir "$RDsb" --repo "$WORK" \
+  --skip failure-pattern-analyst >/dev/null 2>&1
+check "bypass flag used when sandbox unavailable" 'grep -q -- "--dangerously-bypass-approvals-and-sandbox" "$SANDBOX_TRACE"'
+check "no per-role sandbox under bypass"           '! grep -q -- "-s read-only" "$SANDBOX_TRACE"'
+: > "$SANDBOX_TRACE"
+PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDsb" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
+check "no bypass when var unset"                   '! grep -q -- "--dangerously-bypass" "$SANDBOX_TRACE"'
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

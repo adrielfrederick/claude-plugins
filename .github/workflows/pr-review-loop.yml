@@ -1,0 +1,58 @@
+name: PR Review Loop
+
+# Opt-in per PR: add the `review` label. Re-run by removing then re-adding it.
+# Runs on the self-hosted runner (the dedicated Railway service in pr-runner/).
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  review:
+    # Only when the label just added is `review`.
+    if: github.event.label.name == 'review'
+    runs-on: [self-hosted, pr-review]
+    permissions:
+      contents: write          # push fixup commits to the PR branch
+      pull-requests: write      # post review summary + inline comments
+    concurrency:
+      # One loop per PR; a re-label supersedes an in-flight run.
+      group: pr-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    timeout-minutes: 75         # loop self-caps at 60m; margin for setup
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0        # full history for base-branch diffs
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "pr-review-bot"
+          git config user.email "pr-review-bot@users.noreply.github.com"
+
+      - name: Run pr-review-loop
+        env:
+          # Claude (author/orchestrator) authenticates with a long-lived
+          # subscription token from `claude setup-token` — NOT an API key.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Codex (reviewers) authenticates via ChatGPT sign-in cached at
+          # $CODEX_HOME/auth.json on the runner's persistent volume — there's no
+          # OpenAI key here on purpose: setting OPENAI_API_KEY would flip codex
+          # from the ChatGPT subscription to pay-as-you-go API billing.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The loop launches its Codex agents and blocks on a single `wait`
+          # call until they finish (per-agent watchdog caps each at 15 min).
+          # Raise Claude's Bash tool-timeout above that so the blocking call
+          # isn't killed at the 2-min default — otherwise the round dies
+          # mid-wait. Ceiling stays under the job's 75-min timeout.
+          BASH_DEFAULT_TIMEOUT_MS: "1200000"   # 20 min
+          BASH_MAX_TIMEOUT_MS: "1800000"       # 30 min
+          # NOTE: CODEX_SANDBOX_UNAVAILABLE is intentionally NOT set here — it's a
+          # property of the runner (its container can't run bubblewrap), so the
+          # runner's entrypoint.sh exports it. Keeping it off the portable
+          # workflow means other runners aren't forced into unsandboxed Codex.
+        run: |
+          claude --print --dangerously-skip-permissions \
+            "Run the /pr-review-loop skill on this branch's open PR (#${{ github.event.pull_request.number }}). Quiet mode — post a single summary comment at the end."
