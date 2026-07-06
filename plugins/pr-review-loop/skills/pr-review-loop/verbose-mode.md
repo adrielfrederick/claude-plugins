@@ -17,9 +17,9 @@ Read this file only when `QUIET_MODE == false` (the user invoked with `verbose`)
 COMMIT_SHA=$(gh pr view $PR_NUMBER --json headRefOid -q .headRefOid)
 ```
 
-### Step 2: Build `$RUN_DIR/review-payload.json`
+### Step 2: Build `$ROUND_DIR/review-payload.json`
 
-(Use the per-run scratch dir set up in SKILL.md Phase 0 — never bare `/tmp/review-payload.json`, which would collide across parallel loops.)
+(Use this round's scratch dir — `$ROUND_DIR`, set up in SKILL.md Phase 1 Step 0 — never bare `/tmp/review-payload.json`, which would collide across parallel loops, and never `$RUN_DIR` directly, which would collide across rounds of the same loop.)
 
 ```json
 {
@@ -48,7 +48,7 @@ Rules for the comments array:
 
 ```bash
 gh api repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/files --paginate \
-  -q '.[] | {path: .filename, patch: .patch}' > "$RUN_DIR/pr-files-patches.json"
+  -q '.[] | {path: .filename, patch: .patch}' > "$ROUND_DIR/pr-files-patches.json"
 ```
 
 For each comment, confirm the `line` falls within a `+` hunk of that file's patch. If not, move the issue to the summary body.
@@ -58,7 +58,7 @@ For each comment, confirm the `line` falls within a `+` hunk of that file's patc
 ```bash
 gh api repos/{OWNER}/{REPO}/pulls/{PR_NUMBER}/reviews \
   --method POST \
-  --input "$RUN_DIR/review-payload.json"
+  --input "$ROUND_DIR/review-payload.json"
 ```
 
 If the API rejects (usually an invalid line reference):

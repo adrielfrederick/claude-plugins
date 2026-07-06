@@ -1,0 +1,13 @@
+## How to Use Prior Review History
+
+TWO sections below, serving different purposes:
+
+Part 1 — "All Prior Pushbacks" (every round, never dropped):
+The single biggest source of loop non-convergence is reviewers re-raising issues Claude already rebutted.
+- Do NOT re-flag unless you have a STRONGER counter-argument than Claude's recorded reasoning.
+- "Stronger" = you can point to a concrete scenario Claude's reasoning doesn't address.
+- Rewording the same concern is NOT stronger. If you can't clear the bar, SKIP.
+
+Part 2 — "Recent Rounds" (last 2):
+- Resolved: don't re-flag unless the fix introduced a new problem. Be especially strict with "the fix could also handle edge case X" — that's fix-induced drift.
+- New issues in the current diff are still your primary job.

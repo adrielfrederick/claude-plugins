@@ -1,0 +1,1 @@
+SEVERITY FLOOR RAISED: The loop has run 2+ rounds without a CRITICAL finding. Raise your bar — only report findings you are 90%+ confident would block a senior reviewer's approval. Anything below that is "No issues found".

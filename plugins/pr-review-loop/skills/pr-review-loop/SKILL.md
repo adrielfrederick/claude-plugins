@@ -39,7 +39,17 @@ If either is missing, stop and tell the user with the install link from the erro
 3. Extract: `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`, `PR_URL`, `OWNER/REPO` (`gh repo view --json nameWithOwner -q .nameWithOwner`).
 4. `START_TIME=$(date +%s)`, `ITERATION=0`, `CONSECUTIVE_CLEAN_ROUNDS=0`.
 5. Safety nets: `MAX_ITERATIONS=10`, `TIMEOUT_SECONDS=3600` (whole-loop, across rounds), `AGENT_TIMEOUT_SECONDS=900` (per-agent wall-clock watchdog — see Phase 1 Step 4). These are caps, NOT budgets — do not reduce thoroughness to fit within them. Note `TIMEOUT_SECONDS` is evaluated only *between* rounds (Phase 4) and so cannot interrupt a round that is currently hung; `AGENT_TIMEOUT_SECONDS` is the guard that actually bounds a single round's wall time.
-6. **Scratch layout + GC.** State splits by lifetime: `history.md` persists per-PR so follow-up loops reuse prior pushbacks; packet/prompts/reviews are scoped per-run so failed/timed-out agents can never leak a stale file into the next invocation.
+6. **Locate the bundled scripts.** This skill ships two helper scripts next to this SKILL.md, under `scripts/`. Resolve the skill directory (the directory you loaded this SKILL.md from — equivalently `${CLAUDE_PLUGIN_ROOT}/skills/pr-review-loop`) and set:
+
+   ```bash
+   SKILL_DIR="${CLAUDE_PLUGIN_ROOT:?}/skills/pr-review-loop"   # or the dir this SKILL.md lives in
+   BUILD_PROMPTS="$SKILL_DIR/scripts/build-prompts.sh"
+   LAUNCH_AGENTS="$SKILL_DIR/scripts/launch-agents.sh"
+   ```
+
+   If `CLAUDE_PLUGIN_ROOT` is unset, use the absolute path of the directory containing this SKILL.md. `build-prompts.sh` self-locates its `prompts/` fragments, so you never pass the fragment dir.
+
+7. **Scratch layout + GC.** State splits by lifetime: `history.md` persists per-PR so follow-up loops reuse prior pushbacks; the packet is per-run; **prompts/reviews/logs are per-round** (`$RUN_DIR/round-N/`) so a failed/timed-out agent in round N can never leak a stale file from round N−1 into the parse.
 
    ```bash
    mkdir -p /tmp/pr-review
@@ -53,33 +63,68 @@ If either is missing, stop and tell the user with the install link from the erro
    PACKET=$RUN_DIR/packet
    HISTORY=$PR_ROOT/history.md
    mkdir -p "$PACKET/files"
+   echo "$RUN_DIR" > "$PR_ROOT/current-run"   # the ONE blessed pointer to this run — no ad-hoc *_rundir.txt / current_run files
    ```
 
-   All subsequent phases reference `$PACKET`, `$RUN_DIR`, and `$HISTORY` — never the old `/tmp/pr-review-packet` or `/tmp/pr-review-history.md` paths.
+   All subsequent phases reference `$PACKET`, `$RUN_DIR`, `$HISTORY`, and the per-round `$ROUND_DIR` (defined at the top of each Phase 1 round) — never the old `/tmp/pr-review-packet` or `/tmp/pr-review-history.md` paths, and never a hand-invented run-dir pointer file (Phase 0 writes exactly one: `$PR_ROOT/current-run`).
 
 ## Phase 0.5: Build the review packet
 
 Pre-extract everything agents need into `$PACKET`. Without this, each of the 3–6 agents independently rediscovers the repo (cat diff, read CLAUDE.md, dump source files), which dominated token cost in prior runs.
 
+**Resolve the base ref first.** `$BASE_BRANCH` is a bare name (e.g. `main`) from `gh pr view`. On the laptop a local `main` usually exists, but in a CI/runner checkout (the vault-bot `pr-runner`) only the PR head is checked out — bare `main` does not resolve and every `git diff "$BASE_BRANCH"...HEAD` errors. Resolve once, up front:
+
 ```bash
+git rev-parse -q --verify "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 || BASE_BRANCH="origin/$BASE_BRANCH"
+```
+
+**One-time static copies** — only the review-relevant sections of the guideline docs, not the whole file. The full CLAUDE.md is often 10–12KB of deployment/planning/comms prose that every agent re-reads; a diff review needs only commands, testing, conventions, and style limits.
+
+```bash
+# Copy CLAUDE.md but drop sections irrelevant to reviewing a diff. Keep it simple:
+# prefer to copy whole if unsure, but trim the obvious non-review sections when present.
+[ -f CLAUDE.md ] && cp CLAUDE.md "$PACKET/CLAUDE.md"   # then trim in-place (see note below)
+[ -f AGENTS.md ] && cp AGENTS.md "$PACKET/AGENTS.md"
+[ -f .claude/skills/extensions/failure-patterns.md ] && cp .claude/skills/extensions/failure-patterns.md "$PACKET/failure-patterns.md"
+```
+
+After copying `$PACKET/CLAUDE.md`, read it and remove sections a code reviewer doesn't need (deployment, scheduling, planning/execution contracts, communication-style rules), keeping Project/Environment/Commands/Testing/Conventions/style limits. If a section's relevance is ambiguous, keep it — the goal is dropping obvious bulk, not aggressive pruning.
+
+**Diff artifacts — a routine you re-run every round.** Claude pushes fixup commits between rounds, so the diff changes; regenerate these at the start of each round (Phase 1 Step 0), not just once:
+
+```bash
+# refresh_packet_diff: safe to re-run; overwrites the diff artifacts in place.
 gh pr diff $PR_NUMBER > "$PACKET/diff.patch"
 
+rm -rf "$PACKET/files"; mkdir -p "$PACKET/files"
 # Per-file split — eliminates output-truncation re-read loops
 gh pr diff $PR_NUMBER | awk '
   /^diff --git / { if (out) close(out); split($0, a, " "); f=a[4]; sub(/^b\//,"",f); gsub(/\//,"__",f); out="'"$PACKET"'/files/" f ".patch" }
   out { print > out }
 '
+# manifest.txt: exact per-file patch names, so agents read the right files instead of guessing paths or running `find` (the PR 470 token sink).
+ls "$PACKET/files" > "$PACKET/manifest.txt"
 
 git diff "$BASE_BRANCH"...HEAD -U30 > "$PACKET/diff-wide.patch"
-[ -f CLAUDE.md ] && cp CLAUDE.md "$PACKET/CLAUDE.md"
-[ -f AGENTS.md ] && cp AGENTS.md "$PACKET/AGENTS.md"
-[ -f .claude/skills/extensions/failure-patterns.md ] && cp .claude/skills/extensions/failure-patterns.md "$PACKET/failure-patterns.md"
 git diff --stat "$BASE_BRANCH"...HEAD > "$PACKET/changed-files.txt"
 ```
 
-The packet is the agent interface. Agent prompts (see `agent-prompts.md`) tell them to read from here and forbid whole-file dumps.
+The packet is the agent interface. The assembled agent prompts (see `agent-prompts.md`, built by `build-prompts.sh`) tell agents to read from here — including `manifest.txt` for exact filenames — and forbid whole-file dumps.
 
 ## Phase 1: Codex review
+
+### Step 0: Start the round
+
+Set up this round's directory and refresh the diff (Claude pushed fixups last round, so the diff has moved):
+
+```bash
+ROUND_DIR="$RUN_DIR/round-$ITERATION"   # ITERATION starts at 0; incremented in Phase 4
+mkdir -p "$ROUND_DIR"
+# Re-run the refresh_packet_diff routine from Phase 0.5 so diff.patch / diff-wide.patch /
+# files/ / changed-files.txt / manifest.txt reflect the current PR head.
+```
+
+All prompt/review/log files for this round live in `$ROUND_DIR`, never in `$RUN_DIR` directly. This is what makes Step 5's "a missing review file means *this round's* agent failed" reasoning sound — a stale file from round N−1 sits in `round-$((ITERATION-1))`, out of this round's parse path.
 
 ### Step 1: Build review history (skip on first iteration)
 
@@ -112,7 +157,7 @@ Every review round launches **one parallel batch** — there is no serial "secon
 
 These four run on every round regardless of diff size. `type-design-analyzer` is in the core tier (promoted from the old secondary round) because it reliably surfaces real invariant/encapsulation IMPORTANTs and, running in parallel, adds ~0 wall time.
 
-**Conditional add-on — `failure-pattern-analyst`:** if `$PACKET/failure-patterns.md` exists, add it to the parallel batch on every round. When the file is absent, do not spawn it (the persona self-short-circuits, but gating here avoids the launch cost).
+**Conditional add-on — `failure-pattern-analyst`:** `launch-agents.sh` runs it by default. When `$PACKET/failure-patterns.md` is absent, pass `--skip failure-pattern-analyst` (the persona self-short-circuits, but skipping avoids the launch cost).
 
 **Judgment add-ons — you decide each round whether to include them, launched in the *same* parallel batch (never a separate round):**
 
@@ -121,99 +166,66 @@ These four run on every round regardless of diff size. `type-design-analyzer` is
 | `comment-analyzer` | The diff adds or changes a non-trivial amount of comments, docstrings, or docs whose accuracy is worth verifying — not just a couple of one-line comments. |
 | `code-simplifier` | The change is large or spans multiple files with real logic complexity — a plausible candidate for consolidation/simplification. A small, single-file, mechanical diff is not. |
 
-There is no fixed diff-size gate — judge from the packet (`changed-files.txt`, the diff). These two earn their keep on some PRs and are pure noise on others. Default to including a judgment add-on on the round where its trigger first clearly applies (usually the first round on a large diff); don't re-run it every round once it has reported, unless the change has grown materially. When in doubt on a small/clean diff, omit both.
+There is no fixed diff-size gate — judge from the packet (`changed-files.txt`, the diff). These two earn their keep on some PRs and are pure noise on others. Default to including a judgment add-on on the round where its trigger first clearly applies (usually the first round on a large diff); don't re-run it every round once it has reported, unless the change has grown materially. When in doubt on a small/clean diff, omit both. Add them with `--add comment-analyzer` / `--add code-simplifier`.
 
-Never omit a **core-tier** agent — each catches a different class of issue.
+Never omit a **core-tier** agent — each catches a different class of issue. This is now enforced structurally: `launch-agents.sh` always runs the core tier and refuses `--skip` on a core agent, so the PR-470-style accidental omission of `silent-failure-hunter` cannot recur.
 
-### Step 3: Build prompts from `agent-prompts.md`
+### Step 3: Build prompts with `build-prompts.sh`
 
-**You MUST read `agent-prompts.md` and use those prompts verbatim.** Do NOT write your own prompt. This is the single most common failure mode in prior runs — Claude improvises a prompt, drops the severity-discipline block and the packet-read rules, and the agents waste tokens rediscovering the repo and producing low-quality findings. Follow these steps exactly:
+**Do NOT hand-assemble prompts.** Improvised assembly — dropped discipline blocks, duplicated history, drifted read-rules — was the loop's single most frequent failure mode (a "verbatim" prior run still duplicated the whole history block). `build-prompts.sh` assembles them deterministically from the `prompts/` fragments; you only choose the roles and flags.
 
-1. Read `agent-prompts.md` (it's in the same directory as SKILL.md).
-2. For each agent being launched this round:
-   a. Start with the **Review Packet Usage** block (the ` ``` ` block under that heading in agent-prompts.md). Replace the `{PACKET_PATH}` placeholder with the actual value of `$PACKET` (e.g. `/tmp/pr-review/1234/runs/1712345678-9876/packet`).
-   b. If `ITERATION > 0`, append the **History Usage** block (the ` ``` ` block under that heading) with `{HISTORY_CONTENTS}` replaced with the actual contents of `$HISTORY`.
-   c. Append the agent's specific **persona** block (e.g. the `code-reviewer` section's ` ``` ` block).
-   d. If the rising severity floor is active (see Phase 4), append: *"The loop has run 2+ rounds without a CRITICAL finding. Raise your bar — only report findings you are 90%+ confident would block a senior reviewer's approval. Anything below that is 'No issues found'."*
-3. Write the assembled prompt to `$RUN_DIR/prompt-{ROLE}.txt`.
+**(Optional) write a context note first.** If this PR benefits from scope framing an agent can't infer from the diff — its place in a stack/arc, or explicit non-goals ("PR3 of 3, frontend only; backend shipped in #469 — do not flag missing backend logic") — write it (≤6 lines) to `$ROUND_DIR/context.txt` and pass `--context`. This is the *only* prose you author; it rides under a fixed header, leaving the canonical blocks byte-exact. Omit it when the diff speaks for itself.
+
+Then call the script once, listing exactly the roles Step 2 selected:
+
+```bash
+ROLES="code-reviewer,test-analyzer,silent-failure-hunter,type-design-analyzer,failure-pattern-analyst"
+# add ,comment-analyzer / ,code-simplifier if selected; drop failure-pattern-analyst if no failure-patterns.md
+
+"$BUILD_PROMPTS" \
+  --packet "$PACKET" \
+  --out "$ROUND_DIR" \
+  --roles "$ROLES" \
+  $( [ "$ITERATION" -gt 0 ] && printf -- '--history %s' "$HISTORY" ) \
+  $( [ -f "$ROUND_DIR/context.txt" ] && printf -- '--context %s' "$ROUND_DIR/context.txt" ) \
+  $( [ "$SEVERITY_FLOOR_ACTIVE" = "1" ] && printf -- '--severity-floor' )
+```
+
+`--history` only when `ITERATION > 0`; `--severity-floor` only when the rising floor is active (Phase 4 sets `SEVERITY_FLOOR_ACTIVE=1` when `CONSECUTIVE_CLEAN_ROUNDS >= 2`). The script writes `$ROUND_DIR/prompt-<role>.txt` for each role and exits non-zero if any fragment or role is missing — a half-assembled prompt never reaches an agent.
 
 ### Step 4: Launch agents
 
-**Per-agent configuration** (flags per [CLI reference](https://developers.openai.com/codex/cli/reference), reasoning config per [advanced config](https://developers.openai.com/codex/config-advanced#model-reasoning-verbosity-and-limits)):
+**The per-agent sandbox / model / effort config lives in `scripts/launch-agents.sh`** (the `role_config` function) — that script is the single source of truth, so this doc does not restate the table (it drifted from the code before). The script also sets the codex reasoning flags every agent shares: `-c model_reasoning_summary=concise` (minimizes "thinking" summary blocks; ~25% cheaper than the `auto` default) and `-c model_reasoning_effort` per role. The one runtime knob you pass is `--sfh-effort`: `high` for `silent-failure-hunter` while `CONSECUTIVE_CLEAN_ROUNDS == 0`, dropping to `medium` once `≥ 1` (after a clean round the deep error-path trace rarely surfaces anything new). To change any per-agent flag, edit `launch-agents.sh` and bump the plugin version — never hand-transcribe flags here.
 
-| Agent | Model | Sandbox | Effort | Summaries |
-|---|---|---|---|---|
-| code-reviewer | (default) | `--full-auto` | medium | none |
-| test-analyzer | (default) | `--full-auto` | medium | none |
-| silent-failure-hunter | (default) | `-s read-only` | high → medium once `CONSECUTIVE_CLEAN_ROUNDS ≥ 1` | none |
-| type-design-analyzer | gpt-5.4-mini | `-s read-only` | medium | none |
-| comment-analyzer | gpt-5.4-mini | `-s read-only` | low | none |
-| code-simplifier | gpt-5.4-mini | `-s read-only` | low | none |
-| failure-pattern-analyst | (default) | `-s read-only` | medium | none |
-
-Reasoning is controlled via the `-c` config override flag with these keys:
-- `-c model_reasoning_summary=concise` — minimizes "thinking" summary blocks (API accepts `concise`, `detailed`, or `auto`; `none` is rejected). `concise` reduced per-agent token cost ~25% vs the `auto` default in prior runs.
-- `-c model_reasoning_effort={low|medium|high}` — `high` for `silent-failure-hunter` (traces error paths through call sites) **only while `CONSECUTIVE_CLEAN_ROUNDS == 0`; drop it to `medium` once `CONSECUTIVE_CLEAN_ROUNDS ≥ 1`** (after a clean round the deep trace rarely surfaces anything new, and SFH is a recurring critical-path agent); `low` for pattern-matching agents.
-
-The invocation for each agent follows this exact pattern — do not improvise:
+Call the script once per round:
 
 ```bash
-codex exec {SANDBOX} {MODEL_FLAG} \
-  -c model_reasoning_summary=concise \
-  -c model_reasoning_effort={EFFORT} \
-  -C "$(git rev-parse --show-toplevel)" \
-  -o "$RUN_DIR/review-{ROLE}.txt" \
-  "$(cat "$RUN_DIR/prompt-{ROLE}.txt")"
+SFH_EFFORT=$( [ "${CONSECUTIVE_CLEAN_ROUNDS:-0}" -ge 1 ] && echo medium || echo high )
+
+# ADDON_FLAGS: set from Step 2's judgment, e.g. ADDON_FLAGS="--add comment-analyzer"
+# or "--add comment-analyzer --add code-simplifier"; leave empty to add neither.
+ADDON_FLAGS=""
+SKIP_FLAGS=$( [ ! -f "$PACKET/failure-patterns.md" ] && echo "--skip failure-pattern-analyst" )
+
+AGENT_TIMEOUT_SECONDS=$AGENT_TIMEOUT_SECONDS \
+"$LAUNCH_AGENTS" \
+  --run-dir "$ROUND_DIR" \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --sfh-effort "$SFH_EFFORT" \
+  $SKIP_FLAGS $ADDON_FLAGS
 ```
 
-Where for each agent:
-- `code-reviewer`: `SANDBOX=--full-auto`, `MODEL_FLAG=`, `EFFORT=medium`
-- `test-analyzer`: `SANDBOX=--full-auto`, `MODEL_FLAG=`, `EFFORT=medium`
-- `silent-failure-hunter`: `SANDBOX="-s read-only"`, `MODEL_FLAG=`, `EFFORT=high` while `CONSECUTIVE_CLEAN_ROUNDS == 0`, else `EFFORT=medium`
-- `type-design-analyzer`: `SANDBOX="-s read-only"`, `MODEL_FLAG="-m gpt-5.4-mini"`, `EFFORT=medium`
-- `comment-analyzer`: `SANDBOX="-s read-only"`, `MODEL_FLAG="-m gpt-5.4-mini"`, `EFFORT=low`
-- `code-simplifier`: `SANDBOX="-s read-only"`, `MODEL_FLAG="-m gpt-5.4-mini"`, `EFFORT=low`
-- `failure-pattern-analyst`: `SANDBOX="-s read-only"`, `MODEL_FLAG=`, `EFFORT=medium`
+The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent in parallel each under a watchdog, `wait`s, and writes `$ROUND_DIR/.done`. It runs the **core tier unconditionally** and refuses to `--skip` a core agent. `--sfh-effort medium` once `CONSECUTIVE_CLEAN_ROUNDS ≥ 1` (after a clean round the deep error-path trace rarely surfaces anything new); `high` otherwise.
 
-**CRITICAL: After the first agent finishes, check its session header** (first ~10 lines of output) to verify `reasoning effort` and `reasoning summaries` show the intended values, not defaults. If they show `high`/`auto`, stop and debug the `-c` flags before launching more agents.
+**CRITICAL: After the first agent finishes, check its session header** — `head` the corresponding `$ROUND_DIR/log-<role>.txt` (first ~10 lines) and verify `reasoning effort` and `reasoning summaries` show the intended values, not defaults. If they show `high`/`auto` when you asked for something else, stop and debug the codex `-c` flags / CLI version before trusting the round. (On the runner the codex CLI can drift ahead of the laptop's — this check is the canary.)
 
-Run agents in parallel (background bash), each wrapped in a **per-agent wall-clock watchdog**.
-
-Why this exists: codex has no reliable internal wall cap, and the loop-level `TIMEOUT_SECONDS=3600` is checked only *between* rounds (Phase 4) — it cannot interrupt a round that is currently hung. Log analysis of recent runs found the median agent finishes in 2–10 min, but a handful of rounds ran **28–167 minutes** because codex sat in internal API-degradation/network backoff (or the laptop slept mid-run); token counts on those agents were normal, so the time was pure stall, not work — and those tail runs were ~⅔ of all review-loop wall time. A hard per-agent deadline of `AGENT_TIMEOUT_SECONDS` (default 900s = 15 min) sits far above every legitimate agent and far below every observed stall, so it reclaims that tail without ever killing real work.
-
-**Do NOT use GNU `timeout`/`gtimeout`** (not portable; absent on default macOS). Use a portable bash deadline poll, and it must be **deadline-based, not `sleep N && kill`** — a `sleep`-based timer is itself suspended when the machine sleeps, so it would never fire on a sleep-induced stall; a deadline poll compares wall-clock each tick and kills on the first tick after wake.
-
-Launch each agent with this block (one per agent, all backgrounded so they run concurrently). It supersedes the bare invocation shown above — it adds the `log-$ROLE.txt` redirect and the watchdog:
-
-```bash
-# $ROLE, $SANDBOX, $MODEL_FLAG, $EFFORT set per the per-agent table above.
-codex exec $SANDBOX $MODEL_FLAG \
-  -c model_reasoning_summary=concise \
-  -c model_reasoning_effort=$EFFORT \
-  -C "$(git rev-parse --show-toplevel)" \
-  -o "$RUN_DIR/review-$ROLE.txt" \
-  "$(cat "$RUN_DIR/prompt-$ROLE.txt")" > "$RUN_DIR/log-$ROLE.txt" 2>&1 &
-APID=$!
-(
-  DEADLINE=$(( $(date +%s) + AGENT_TIMEOUT_SECONDS ))
-  while kill -0 "$APID" 2>/dev/null; do
-    if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      kill -TERM "$APID" 2>/dev/null; sleep 5; kill -KILL "$APID" 2>/dev/null
-      printf '\nWATCHDOG_KILLED after %ss\n' "$AGENT_TIMEOUT_SECONDS" >> "$RUN_DIR/review-$ROLE.txt"
-      break
-    fi
-    sleep 15
-  done
-) &
-```
-
-After launching the batch, `wait` for the codex PIDs — each either completes or is watchdog-killed. A killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-$ROLE.txt`; Phase 1 Step 5 treats that (like an empty/missing file) as "this agent produced no findings this round" and notes it in the wrap-up.
+**Watchdog rationale (why the script wraps each agent in a deadline poll):** codex has no reliable internal wall cap, and the loop-level `TIMEOUT_SECONDS=3600` is checked only *between* rounds (Phase 4) — it cannot interrupt a round that is currently hung. Log analysis found the median agent finishes in 2–10 min, but a handful of rounds ran **28–167 minutes** because codex sat in API-degradation/network backoff (or the laptop slept mid-run); token counts were normal, so the time was pure stall — and those tails were ~⅔ of all review-loop wall time. The per-agent deadline `AGENT_TIMEOUT_SECONDS` (default 900s) sits far above every legitimate agent and far below every observed stall. The poll is **deadline-based, not `sleep N && kill`** (a sleep timer is itself suspended on machine sleep and would never fire; a deadline poll compares wall-clock each tick and kills on the first tick after wake) — this guards server-side network stalls on the runner as well as laptop sleep. A watchdog-killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-<role>.txt`; Step 5 treats that as "no findings this round."
 
 **Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — exit the loop with status `CODEX_DEGRADED` and tell the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
 
 ### Step 5: Read and parse findings
 
-Read each `$RUN_DIR/review-{ROLE}.txt`. Parse structured findings. If the file does not exist, is empty, or contains the `WATCHDOG_KILLED` sentinel (the watchdog killed a stalled agent), skip that agent and note it in the summary as "no findings (watchdog-killed)" — do not retry it inline. (Because `$RUN_DIR` is unique per invocation, a missing file unambiguously means this run's agent failed — there is no risk of reading a prior run's output.) If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: exit `CODEX_DEGRADED`.
+Read each `$ROUND_DIR/review-{ROLE}.txt`. Parse structured findings. If the file does not exist, is empty, or contains the `WATCHDOG_KILLED` sentinel (the watchdog killed a stalled agent), skip that agent and note it in the summary as "no findings (watchdog-killed)" — do not retry it inline. (Because `$ROUND_DIR` is unique per round, a missing file unambiguously means *this round's* agent failed — a stale file from a prior round lives in a different `round-N` directory and can't be misread as this round's output.) If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: exit `CODEX_DEGRADED`.
 
 ## Phase 2: Aggregate findings
 
@@ -316,5 +328,8 @@ Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop 
 
 ## Bundled files
 
-- `agent-prompts.md` — the six agent personas plus shared Review Packet Usage and History Usage blocks
+- `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
+- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier (Phase 1 Step 4)
+- `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, and one persona file per agent
+- `agent-prompts.md` — documents the fragments and assembly order (no longer hand-assembled)
 - `verbose-mode.md` — PR-posting mechanics used only when `verbose` is passed
