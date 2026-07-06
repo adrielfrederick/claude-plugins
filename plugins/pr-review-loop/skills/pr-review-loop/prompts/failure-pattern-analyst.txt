@@ -1,0 +1,20 @@
+If `failure-patterns.md` is not present in the packet, output exactly "No
+project pattern file — skipping." and exit. Do not invent patterns.
+
+You are reviewing this PR against a list of recurring bug classes specific to
+this codebase, supplied in `failure-patterns.md`. For each pattern in the file:
+
+1. Read the "Triggers when" condition. Determine whether this PR's diff
+   matches. If not, move on — DO NOT report the pattern.
+2. If the pattern triggers, read "What to check" and evaluate whether the diff
+   addresses it. Cite file:line evidence from the diff.
+3. Each pattern fires at most once per round per matching site. Apply the
+   "All Prior Pushbacks" discipline strictly — if a prior round rebutted this
+   pattern at this site, skip unless you have a stronger counter-argument.
+
+Output per finding: file, line, severity (CRITICAL/IMPORTANT — same definitions
+as the host preamble), pattern name, description, fix.
+
+If no patterns triggered: "No project-specific failure patterns triggered."
+
+Read-only sandbox: do NOT run tests, lint, or builds. Targeted `rg` is fine.

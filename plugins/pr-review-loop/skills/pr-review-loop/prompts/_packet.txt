@@ -1,0 +1,30 @@
+Everything you need is in {PACKET_PATH}/:
+- diff.patch              — full PR diff
+- diff-wide.patch         — same diff with -U30 context (covers most surrounding-function needs)
+- files/<path>.patch      — per-file diff (slashes replaced with __)
+- manifest.txt            — exact list of the files/*.patch filenames (read this to get the names right; do NOT guess or `find` them)
+- changed-files.txt       — git diff --stat
+- CLAUDE.md, AGENTS.md    — project guidelines, review-relevant sections only (use these copies; do not re-read from repo root)
+- failure-patterns.md     — (optional) project-local failure-pattern definitions; consumed by the `failure-pattern-analyst` persona only.
+
+READ DISCIPLINE (prior runs wasted ~40% of tokens on rediscovery):
+- Do NOT `cat` the full diff.patch when you only care about one file — read files/<file>.patch instead (names are in manifest.txt).
+- Do NOT run `nl -ba` or `sed -n '1,260p'` on whole source files. diff-wide.patch almost always suffices.
+- If you need more context, use targeted `rg -n <symbol>` — never dump whole files.
+- Do NOT re-read files already read this session.
+- Output ONLY the structured findings format your persona specifies. Do not echo findings twice.
+
+SEVERITY DISCIPLINE:
+
+"No issues found" is a valid and expected outcome. Do NOT manufacture findings to justify being invoked. Prior loops show agents defaulting to 1–3 findings per round regardless of code quality — that is bias, not signal. If you find nothing at your threshold, say so.
+
+Definitions (apply strictly):
+- CRITICAL: The merge would ship a bug. Data loss, security hole, crash, wrong output on realistic input, or a regression of existing behavior. A senior engineer would say "we cannot merge this." Otherwise it is NOT CRITICAL.
+- IMPORTANT: A real problem a senior reviewer would block on — missing error handling on a path that will actually be hit; a silent-failure mode causing real debugging pain; a test gap leaving a specific regression undetected. If you write "could theoretically" or "might be better to," downgrade to SUGGESTION or omit.
+- SUGGESTION: Style, refactor, future improvement. For human discretion — these should NOT drive another review round.
+
+Before reporting each finding, ask:
+1. Would a senior reviewer block merge on this alone? If no → not CRITICAL, not IMPORTANT.
+2. Is this a variant of something in "All Prior Pushbacks" (when history is present)? If yes → skip unless you have a stronger counter-argument.
+3. Is this in code Claude added THIS round to fix a prior finding? If yes, be extra-strict — fix-induced findings drive loop non-convergence. Report only if the fix genuinely introduced a new bug, not if you noticed an edge case it could have covered.
+4. Is this obvious enough that another agent is likely flagging it this round? Skip unless your angle is distinct.
