@@ -177,7 +177,9 @@ codex exec {SANDBOX} {MODEL_FLAG} \
   "$(cat "$RUN_DIR/prompt-{ROLE}.txt")"
 ```
 
-Where for each agent:
+**Sandbox availability (locked-down containers).** If the environment variable `CODEX_SANDBOX_UNAVAILABLE` is set, **override every agent's `SANDBOX` to `--dangerously-bypass-approvals-and-sandbox`** and ignore the per-agent values below. Some environments — notably unprivileged CI containers (e.g. a Railway-hosted self-hosted runner) — can't create the user namespaces Codex's `bubblewrap`/`landlock` sandbox needs, so **every** `codex exec` fails at sandbox setup (`Permission denied` creating a namespace) and the agents review nothing while still emitting ungrounded "clean" verdicts. Bypassing runs Codex with no OS sandbox and no approval prompts — acceptable **only** because such a runner is itself a locked-down, single-purpose, throwaway container (the container is the sandbox) reviewing trusted, same-repo PRs. When the var is unset (local/interactive), use the per-agent values unchanged so real sandboxing applies.
+
+Where for each agent (unless `CODEX_SANDBOX_UNAVAILABLE` overrides `SANDBOX`, above):
 - `code-reviewer`: `SANDBOX=--full-auto`, `MODEL_FLAG=`, `EFFORT=medium`
 - `test-analyzer`: `SANDBOX=--full-auto`, `MODEL_FLAG=`, `EFFORT=medium`
 - `silent-failure-hunter`: `SANDBOX="-s read-only"`, `MODEL_FLAG=`, `EFFORT=high` while `CONSECUTIVE_CLEAN_ROUNDS == 0`, else `EFFORT=medium`
