@@ -23,6 +23,17 @@ Every design decision — when to stop, what severity bar to apply, which agents
 
 Set `QUIET_MODE=true` unless `verbose` is in `$ARGUMENTS`. Tell the user which mode is active.
 
+## Runtime: drive the whole loop within one turn
+
+You may be running non-interactively under `claude --print` (e.g. a self-hosted
+CI runner triggered by a label). In that mode **there is no turn resumption and
+no scheduled wakeup — you are never re-invoked after you stop.** So you must
+carry every phase to completion within a single turn: never launch background
+work and then stop/yield to "wait" for it to finish and resume you. Anything you
+background is orphaned and killed the moment you stop, and the loop dies silently
+with no summary. Block on long-running work **inline** instead (see Phase 1
+Step 4). This is also correct interactively — it just matters most here.
+
 ## Phase 0: Setup
 
 **Preflight — required CLIs.** Before anything else, verify the external CLIs this skill shells out to are on PATH:
@@ -207,7 +218,11 @@ APID=$!
 ) &
 ```
 
-After launching the batch, `wait` for the codex PIDs — each either completes or is watchdog-killed. A killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-$ROLE.txt`; Phase 1 Step 5 treats that (like an empty/missing file) as "this agent produced no findings this round" and notes it in the wrap-up.
+**Run the whole batch — every agent's launch block above plus a trailing `wait` — as ONE foreground bash call, and give that call a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS` (the CI runner sets a high `BASH_DEFAULT_TIMEOUT_MS` for this).** The trailing `wait` blocks that single call until every codex PID has either completed or been watchdog-killed, which keeps the entire round inside one turn.
+
+**Do NOT** launch the agents as separate background tasks and then stop/yield to "wait" for them — per the Runtime note above, a non-interactive `claude --print` run is never resumed, so backgrounded agents are orphaned and killed the instant you stop and the loop dies with no summary. One blocking `wait` call is how you avoid that. (If a single call would exceed your bash tool-timeout, instead poll in-turn: launch the batch `nohup`-detached, then loop short `sleep`+check bash calls until every `review-$ROLE.txt` is present — still never yielding the turn.)
+
+A killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-$ROLE.txt`; Phase 1 Step 5 treats that (like an empty/missing file) as "this agent produced no findings this round" and notes it in the wrap-up.
 
 **Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — exit the loop with status `CODEX_DEGRADED` and tell the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
 
