@@ -39,15 +39,15 @@ If either is missing, stop and tell the user with the install link from the erro
 3. Extract: `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`, `PR_URL`, `OWNER/REPO` (`gh repo view --json nameWithOwner -q .nameWithOwner`).
 4. `START_TIME=$(date +%s)`, `ITERATION=0`, `CONSECUTIVE_CLEAN_ROUNDS=0`.
 5. Safety nets: `MAX_ITERATIONS=10`, `TIMEOUT_SECONDS=3600` (whole-loop, across rounds), `AGENT_TIMEOUT_SECONDS=900` (per-agent wall-clock watchdog — see Phase 1 Step 4). These are caps, NOT budgets — do not reduce thoroughness to fit within them. Note `TIMEOUT_SECONDS` is evaluated only *between* rounds (Phase 4) and so cannot interrupt a round that is currently hung; `AGENT_TIMEOUT_SECONDS` is the guard that actually bounds a single round's wall time.
-6. **Locate the bundled scripts.** This skill ships two helper scripts next to this SKILL.md, under `scripts/`. Resolve the skill directory (the directory you loaded this SKILL.md from — equivalently `${CLAUDE_PLUGIN_ROOT}/skills/pr-review-loop`) and set:
+6. **Locate the bundled scripts.** This skill ships its helper scripts and prompt fragments next to this SKILL.md, under `scripts/` and `prompts/`. Set `SKILL_DIR` to **this skill's base directory** — the absolute path printed as "Base directory for this skill" when the skill loads (equivalently, the directory this SKILL.md lives in). Anchoring on the base dir works for **both** install layouts: standalone (`~/.claude/skills/pr-review-loop`) and plugin (`.../plugins/pr-review-loop/skills/pr-review-loop`).
 
    ```bash
-   SKILL_DIR="${CLAUDE_PLUGIN_ROOT:?}/skills/pr-review-loop"   # or the dir this SKILL.md lives in
+   SKILL_DIR="<this skill's base directory>"   # e.g. /Users/adriel/.claude/skills/pr-review-loop
    BUILD_PROMPTS="$SKILL_DIR/scripts/build-prompts.sh"
    LAUNCH_AGENTS="$SKILL_DIR/scripts/launch-agents.sh"
    ```
 
-   If `CLAUDE_PLUGIN_ROOT` is unset, use the absolute path of the directory containing this SKILL.md. `build-prompts.sh` self-locates its `prompts/` fragments, so you never pass the fragment dir.
+   `build-prompts.sh` self-locates its `prompts/` fragments relative to its own path, so you never pass the fragment dir. **Do NOT** anchor on `${CLAUDE_PLUGIN_ROOT}` — it is unset for standalone skill installs, so `${CLAUDE_PLUGIN_ROOT:?}/...` would hard-fail there.
 
 7. **Scratch layout + GC.** State splits by lifetime: `history.md` persists per-PR so follow-up loops reuse prior pushbacks; the packet is per-run; **prompts/reviews/logs are per-round** (`$RUN_DIR/round-N/`) so a failed/timed-out agent in round N can never leak a stale file from round N−1 into the parse.
 
