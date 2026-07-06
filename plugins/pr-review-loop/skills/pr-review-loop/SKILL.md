@@ -225,7 +225,14 @@ The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent i
 
 ### Step 5: Read and parse findings
 
-Read each `$ROUND_DIR/review-{ROLE}.txt`. Parse structured findings. If the file does not exist, is empty, or contains the `WATCHDOG_KILLED` sentinel (the watchdog killed a stalled agent), skip that agent and note it in the summary as "no findings (watchdog-killed)" — do not retry it inline. (Because `$ROUND_DIR` is unique per round, a missing file unambiguously means *this round's* agent failed — a stale file from a prior round lives in a different `round-N` directory and can't be misread as this round's output.) If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: exit `CODEX_DEGRADED`.
+First check the launcher's exit: if `launch-agents.sh` exited non-zero, `$ROUND_DIR/.failed` lists the roles that **crashed** (codex exited non-zero without producing a review — bad/deprecated flag, untrusted or missing binary, auth error). A crashed agent is **not** "no findings" — it never ran. Do not treat a crash as clean: report it, surface the agent's `log-<role>.txt` (the first ~15 lines usually name the cause), fix the environment/flags, and re-run the round. If **every** agent crashed, exit `CODEX_DEGRADED` (same as the all-watchdog-killed case).
+
+Then read each `$ROUND_DIR/review-{ROLE}.txt` and parse structured findings, classifying by trailing sentinel:
+- ends with a `WATCHDOG_KILLED` line → the watchdog killed a stalled agent; note "no findings (watchdog-killed)" and do not retry inline.
+- ends with an `AGENT_FAILED exit=N` line → the agent crashed (also in `.failed`); handle per the paragraph above — **never** count as "no findings."
+- missing or empty with no sentinel and no `.failed` entry → treat as "no findings" (agent ran, said nothing). Because `$ROUND_DIR` is unique per round, a missing file unambiguously means *this round's* agent, not a stale prior-round file.
+
+If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: exit `CODEX_DEGRADED`.
 
 ## Phase 2: Aggregate findings
 

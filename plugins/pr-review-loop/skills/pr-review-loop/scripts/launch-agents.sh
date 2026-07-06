@@ -133,20 +133,57 @@ launch() {
     local deadline=$(( $(date +%s) + AGENT_TIMEOUT_SECONDS ))
     while kill -0 "$apid" 2>/dev/null; do
       if [ "$(date +%s)" -ge "$deadline" ]; then
-        kill -TERM "$apid" 2>/dev/null; sleep 5; kill -KILL "$apid" 2>/dev/null
+        # Write the sentinel BEFORE killing: the reap loop unblocks the instant
+        # the agent dies, so an after-kill write would race and be missed,
+        # causing a watchdog kill to be misclassified as an AGENT_FAILED crash.
         printf '\nWATCHDOG_KILLED after %ss\n' "$AGENT_TIMEOUT_SECONDS" >> "$RUN_DIR/review-$role.txt"
+        kill -TERM "$apid" 2>/dev/null; sleep 5; kill -KILL "$apid" 2>/dev/null
         break
       fi
       sleep 15
     done
   ) &
+  AGENT_PIDS+=("$role:$apid")
   echo "launched $role (sandbox='$sandbox' model='${model:-default}' effort='$effort') pid=$apid"
 }
 
+AGENT_PIDS=()
 for role in "${ROLES[@]}"; do
   launch "$role"
 done
 
-wait
+# Reap each agent individually and classify its exit. A codex that fails fast
+# (deprecated/rejected flag, missing or untrusted binary, auth error) exits
+# non-zero and leaves an EMPTY review file. Without this check, Step 5 reads
+# that empty file as "no findings" and the round can exit CLEAN with an agent
+# that never actually ran — a false-clean. Distinguish three outcomes:
+#   exit 0                          → agent ran to completion
+#   non-zero + WATCHDOG_KILLED line → expected watchdog kill of a stalled agent
+#   non-zero, no sentinel           → crash → append AGENT_FAILED, fail the batch
+FAILED=()
+for entry in "${AGENT_PIDS[@]}"; do
+  role="${entry%%:*}"; pid="${entry##*:}"
+  if wait "$pid"; then
+    :
+  else
+    st=$?
+    if grep -q '^WATCHDOG_KILLED' "$RUN_DIR/review-$role.txt" 2>/dev/null; then
+      :
+    else
+      printf '\nAGENT_FAILED exit=%s\n' "$st" >> "$RUN_DIR/review-$role.txt"
+      echo "AGENT FAILED: $role exited $st without producing a review — see log-$role.txt" >&2
+      FAILED+=("$role")
+    fi
+  fi
+done
+
+# Watchdogs self-exit once their agent is reaped; reap any stragglers.
+wait 2>/dev/null || true
+
 echo "DONE" > "$RUN_DIR/.done"
+if [ "${#FAILED[@]}" -gt 0 ]; then
+  printf '%s\n' "${FAILED[@]}" > "$RUN_DIR/.failed"
+  echo "agents FAILED (crashed, not watchdog-killed): ${FAILED[*]}" >&2
+  exit 3
+fi
 echo "all agents finished: ${ROLES[*]}"
