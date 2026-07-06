@@ -72,10 +72,19 @@ If either is missing, stop and tell the user with the install link from the erro
 
 Pre-extract everything agents need into `$PACKET`. Without this, each of the 3–6 agents independently rediscovers the repo (cat diff, read CLAUDE.md, dump source files), which dominated token cost in prior runs.
 
-**Resolve the base ref first.** `$BASE_BRANCH` is a bare name (e.g. `main`) from `gh pr view`. On the laptop a local `main` usually exists, but in a CI/runner checkout (the vault-bot `pr-runner`) only the PR head is checked out — bare `main` does not resolve and every `git diff "$BASE_BRANCH"...HEAD` errors. Resolve once, up front:
+**Resolve the base ref first.** `$BASE_BRANCH` is a bare name (e.g. `main`) from `gh pr view`. On the laptop a local `main` usually exists, but in a CI/runner checkout (the vault-bot `pr-runner`) only the PR head is checked out — bare `main` doesn't resolve, and neither may `origin/main`, so every `git diff "$BASE_BRANCH"...HEAD` errors. Resolve once, up front, fetching if needed, and hard-fail rather than silently producing an empty packet:
 
 ```bash
-git rev-parse -q --verify "refs/heads/$BASE_BRANCH" >/dev/null 2>&1 || BASE_BRANCH="origin/$BASE_BRANCH"
+if git rev-parse -q --verify "refs/heads/$BASE_BRANCH" >/dev/null 2>&1; then
+  :                                             # local branch (laptop)
+elif git rev-parse -q --verify "refs/remotes/origin/$BASE_BRANCH" >/dev/null 2>&1; then
+  BASE_BRANCH="origin/$BASE_BRANCH"             # remote-tracking ref present
+else
+  # head-only checkout (runner): fetch the base so a merge-base exists for the 3-dot diff.
+  git fetch --no-tags origin "$BASE_BRANCH" 2>/dev/null \
+    && BASE_BRANCH=FETCH_HEAD \
+    || { echo "Error: cannot resolve base ref '$BASE_BRANCH' — no local/remote ref and fetch failed."; exit 1; }
+fi
 ```
 
 **One-time static copies** — only the review-relevant sections of the guideline docs, not the whole file. The full CLAUDE.md is often 10–12KB of deployment/planning/comms prose that every agent re-reads; a diff review needs only commands, testing, conventions, and style limits.

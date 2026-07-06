@@ -81,9 +81,11 @@ for role in "${ROLE_ARR[@]}"; do
   [ -n "$role" ] || continue
   out="$OUT_DIR/prompt-$role.txt"
   {
-    # 1. Packet block, with the packet path substituted (a filesystem path
-    #    never contains '|', so the sed delimiter is safe).
-    sed "s|{PACKET_PATH}|$PACKET|g" "$PROMPTS_DIR/_packet.txt"
+    # 1. Packet block, with the packet path substituted. Bash literal
+    #    replacement, not sed: a packet path containing sed metacharacters
+    #    (&, |, \) would otherwise corrupt the substitution.
+    packet_block="$(cat "$PROMPTS_DIR/_packet.txt")"
+    printf '%s\n' "${packet_block//"{PACKET_PATH}"/$PACKET}"
 
     # 2. History: fixed preamble, then the actual history file verbatim.
     if [ -n "$HISTORY_FILE" ]; then

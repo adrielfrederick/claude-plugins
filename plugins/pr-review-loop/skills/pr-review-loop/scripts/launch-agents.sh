@@ -164,7 +164,14 @@ FAILED=()
 for entry in "${AGENT_PIDS[@]}"; do
   role="${entry%%:*}"; pid="${entry##*:}"
   if wait "$pid"; then
-    :
+    # Exit 0 but an empty review file is anomalous — every persona is told to
+    # write at least "No issues found." A codex output-write failure or a CLI
+    # behavior change would otherwise be read as a clean "no findings" round.
+    if [ ! -s "$RUN_DIR/review-$role.txt" ]; then
+      printf '\nAGENT_FAILED exit=0-empty-output\n' >> "$RUN_DIR/review-$role.txt"
+      echo "AGENT FAILED: $role exited 0 but produced no review — see log-$role.txt" >&2
+      FAILED+=("$role")
+    fi
   else
     st=$?
     if grep -q '^WATCHDOG_KILLED' "$RUN_DIR/review-$role.txt" 2>/dev/null; then

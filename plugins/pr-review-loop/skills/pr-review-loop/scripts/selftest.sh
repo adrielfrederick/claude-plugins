@@ -104,8 +104,32 @@ RDw="$WORK/run-wd"; mkdir -p "$RDw"; mkprompts "$RDw" "${ALL[@]}"
 # tiny deadline so the watchdog fires fast; only the core tier to keep it quick
 PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=1 bash "$LAUNCH" --run-dir "$RDw" --repo "$WORK" \
   --skip failure-pattern-analyst >/dev/null 2>&1
+rcw=$?
 check "watchdog appended sentinel"        'grep -q "^WATCHDOG_KILLED" "$RDw/review-code-reviewer.txt"'
 check "watchdog kill != AGENT_FAILED"     '! grep -q "^AGENT_FAILED" "$RDw/review-code-reviewer.txt"'
+check "watchdog batch exits 0"            '[ "$rcw" -eq 0 ]'
+check "watchdog writes .done"             '[ -f "$RDw/.done" ]'
+check "watchdog leaves no .failed"        '[ ! -f "$RDw/.failed" ]'
+
+echo "== exit-0 with empty output =="
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+exit 0
+FAKE
+chmod +x "$BIN/codex"
+RDe="$WORK/run-empty"; mkdir -p "$RDe"; mkprompts "$RDe" "${ALL[@]}"
+PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDe" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
+rce=$?
+check "exit-0 empty output fails batch"   '[ "$rce" -ne 0 ]'
+check "exit-0 empty writes .failed"       '[ -s "$RDe/.failed" ]'
+check "exit-0 empty AGENT_FAILED marker"  'grep -q "AGENT_FAILED exit=0-empty-output" "$RDe/review-code-reviewer.txt"'
+
+echo "== packet path with sed metacharacters =="
+PKAMP="$WORK/pk&meta"; mkdir -p "$PKAMP/files"
+RDamp="$WORK/r-amp"; mkdir -p "$RDamp"
+bash "$BUILD" --packet "$PKAMP" --out "$RDamp" --roles code-reviewer >/dev/null
+check "ampersand path substituted literally" 'grep -qF "$PKAMP/" "$RDamp/prompt-code-reviewer.txt"'
+check "no corrupted placeholder remains"     '! grep -q "{PACKET_PATH}" "$RDamp/prompt-code-reviewer.txt"'
 
 echo
 echo "passed=$PASS failed=$FAIL"
