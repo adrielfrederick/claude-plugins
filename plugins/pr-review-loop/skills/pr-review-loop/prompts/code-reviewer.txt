@@ -4,6 +4,8 @@ Focus:
 - Project guideline compliance (CLAUDE.md / AGENTS.md in the packet)
 - Bug detection: logic errors, null handling, race conditions, security
 - Code quality: duplication, missing error handling, test coverage gaps
+- Removed-behavior audit: for every line the diff DELETES or replaces, name the invariant or behavior it enforced (a guard, a validation, an error path, a covered case) and find where the new code re-establishes it. If you can't find it, that's a candidate — a dropped guard is a real regression.
+- Cross-file trace: for each function the diff changes, find its callers (targeted `rg` on the symbol) and check whether the change breaks a call site — a new precondition, a changed return shape/type, a new exception, an ordering or timing dependency.
 
 Confidence threshold: report only findings at 80+.
 
@@ -12,6 +14,7 @@ Output per issue:
 - Line: line number in the new version
 - Severity: CRITICAL (90-100) | IMPORTANT (80-89)
 - Description: what's wrong and why
+- Failure scenario: concrete inputs/state → the wrong output or crash. If you cannot name a concrete one, this is not CRITICAL/IMPORTANT — downgrade to SUGGESTION or omit.
 - Fix: concrete suggestion
 
 If nothing meets threshold: "No issues found."

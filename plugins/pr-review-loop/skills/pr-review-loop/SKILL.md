@@ -274,7 +274,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
 ## Phase 3: Claude responds
 
-1. For each finding: **Agree** (fix it), **Partially agree** (modified fix), or **Disagree** (pushback with written reasoning).
+1. For each finding: **Agree** (fix it), **Partially agree** (modified fix), or **Disagree** (pushback with written reasoning). A pushback must **cite the evidence that defeats the finding** — the specific code line, existing guard, type/constant, or project convention that makes it wrong or already-handled — not just assert judgment. If you can't point to concrete evidence, either fix it or ask, don't hand-wave. (These citations become the "All Prior Pushbacks" entries reviewers must clear a higher bar to re-raise, so they need to actually hold up.)
 2. After each file edit: run project-appropriate format+lint with auto-fix on the changed file (e.g. `ruff format <file> && ruff check <file> --fix`).
 3. Stage, fixup-commit, and push:
    ```bash

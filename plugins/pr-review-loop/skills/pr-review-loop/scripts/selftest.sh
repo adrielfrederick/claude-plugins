@@ -51,6 +51,17 @@ order_ok() {
 check "blocks in canonical order"         'order_ok'
 check "unknown role fails non-zero"       '! bash "$BUILD" --packet "$PACKET" --out "$R2" --roles nope 2>/dev/null'
 
+echo "== persona content (review-quality fields) =="
+CR="$R/prompt-code-reviewer.txt"
+check "code-reviewer has failure_scenario" 'grep -qi "Failure scenario:" "$CR"'
+check "code-reviewer has removed-behavior" 'grep -qi "Removed-behavior audit" "$CR"'
+check "code-reviewer has cross-file trace" 'grep -qi "Cross-file trace" "$CR"'
+RC="$WORK/r-content"; mkdir -p "$RC"
+bash "$BUILD" --packet "$PACKET" --out "$RC" --roles comment-analyzer,code-simplifier,test-analyzer >/dev/null
+check "comment-analyzer severity aligned"  'grep -qi "ACTIVELY MISLEADING" "$RC/prompt-comment-analyzer.txt"'
+check "code-simplifier caps at SUGGESTION" 'grep -qi "default to SUGGESTION" "$RC/prompt-code-simplifier.txt"'
+check "test-analyzer has failure_scenario" 'grep -qi "Failure scenario:" "$RC/prompt-test-analyzer.txt"'
+
 echo "== launch-agents.sh (fake codex) =="
 BIN="$WORK/bin"; mkdir -p "$BIN"
 # fake codex: writes "No issues found." to the -o path, exits 0

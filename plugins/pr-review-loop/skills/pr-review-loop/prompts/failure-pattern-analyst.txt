@@ -13,7 +13,9 @@ this codebase, supplied in `failure-patterns.md`. For each pattern in the file:
    pattern at this site, skip unless you have a stronger counter-argument.
 
 Output per finding: file, line, severity (CRITICAL/IMPORTANT — same definitions
-as the host preamble), pattern name, description, fix.
+as the host preamble), pattern name, description, failure scenario (concrete
+inputs/state → the bug this pattern names), and fix. If you can't name a
+concrete failure scenario, the pattern hasn't really triggered — skip it.
 
 If no patterns triggered: "No project-specific failure patterns triggered."
 

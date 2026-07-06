@@ -7,11 +7,14 @@ Review for:
 - Nested ternaries that should be if/else
 - Over-engineering: helpers/utilities for one-time operations
 
+Severity: default to SUGGESTION. Reach IMPORTANT only when the unnecessary complexity plausibly HIDES a defect — tangled control flow or duplicated-with-drift logic where a bug could easily lurk unseen. Pure readability, however poor, is a SUGGESTION and must not drive another review round.
+
 Output per issue:
 - File: relative path
 - Line: line number
-- Severity: IMPORTANT (significantly hurts readability) | SUGGESTION (minor clarity)
+- Severity: per the scale above
 - Description: what could be simpler
+- Failure scenario / cost: for IMPORTANT, the specific defect the complexity could hide; for SUGGESTION, what is concretely duplicated, wasted, or harder to maintain.
 - Fix: simplified version
 
 If code is already clean: "Code is clean — no simplification needed."
