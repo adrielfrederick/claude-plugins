@@ -52,12 +52,20 @@ check "blocks in canonical order"         'order_ok'
 check "unknown role fails non-zero"       '! bash "$BUILD" --packet "$PACKET" --out "$R2" --roles nope 2>/dev/null'
 
 echo "== build-prompts.sh --scoped =="
+# Fail closed FIRST, while there is no delta.patch — a scoped round that reviews
+# a missing/empty delta would report clean without checking the fix.
+RSE="$WORK/r-scoped-empty"; mkdir -p "$RSE"
+check "scoped fails with no delta.patch"  '! bash "$BUILD" --packet "$PACKET" --out "$RSE" --roles code-reviewer --scoped 2>/dev/null'
+# Now provide a delta and verify the scoped addendum assembles correctly.
+printf 'diff --git a/x b/x\n+real change\n' > "$PACKET/delta.patch"
 RS="$WORK/r-scoped"; mkdir -p "$RS"
 bash "$BUILD" --packet "$PACKET" --out "$RS" --roles code-reviewer,test-analyzer --scoped >/dev/null
+check "scoped succeeds with a delta.patch" '[ -f "$RS/prompt-code-reviewer.txt" ]'
 check "scoped addendum present"           'grep -q "SCOPED VERIFY ROUND" "$RS/prompt-code-reviewer.txt"'
 check "scoped points at delta.patch"      'grep -q "delta.patch" "$RS/prompt-code-reviewer.txt"'
 check "scoped addendum precedes persona"  '[ "$(grep -n "SCOPED VERIFY ROUND" "$RS/prompt-code-reviewer.txt" | head -1 | cut -d: -f1)" -lt "$(grep -n "expert code reviewer" "$RS/prompt-code-reviewer.txt" | head -1 | cut -d: -f1)" ]'
 check "non-scoped omits the addendum"     '! grep -q "SCOPED VERIFY ROUND" "$R/prompt-code-reviewer.txt"'
+rm -f "$PACKET/delta.patch"
 
 echo "== persona content (review-quality fields) =="
 RC="$WORK/r-content"; mkdir -p "$RC"
@@ -111,6 +119,8 @@ check "--only runs exactly the named roles"   '[ -f "$RDo/review-code-reviewer.t
 check "--only omits unnamed core agents"      '[ ! -f "$RDo/review-silent-failure-hunter.txt" ] && [ ! -f "$RDo/review-type-design-analyzer.txt" ]'
 check "--only rejects an unknown role"        '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only nope 2>/dev/null'
 check "--only rejects combining with --add"   '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer --add comment-analyzer 2>/dev/null'
+check "--only rejects an empty value"         '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only "" 2>/dev/null'
+check "--only rejects a stray-comma entry"    '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only "code-reviewer," 2>/dev/null'
 
 echo "== agent-failure detection =="
 cat > "$BIN/codex" <<'FAKE'

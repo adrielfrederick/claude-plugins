@@ -34,6 +34,7 @@ SFH_EFFORT="high"
 ADDONS=()
 SKIP=()
 ONLY=""
+ONLY_SET=0
 : "${AGENT_TIMEOUT_SECONDS:=900}"
 
 die() { echo "launch-agents.sh: $*" >&2; exit 1; }
@@ -45,7 +46,7 @@ while [ $# -gt 0 ]; do
     --sfh-effort) SFH_EFFORT="${2:-}"; shift 2 ;;
     --add)        ADDONS+=("${2:-}"); shift 2 ;;
     --skip)       SKIP+=("${2:-}"); shift 2 ;;
-    --only)       ONLY="${2:-}"; shift 2 ;;
+    --only)       ONLY="${2:-}"; ONLY_SET=1; shift 2 ;;
     *)            die "unknown argument: $1" ;;
   esac
 done
@@ -78,12 +79,13 @@ CORE=(code-reviewer test-analyzer silent-failure-hunter type-design-analyzer)
 # full tier. The orchestrator only reaches it via the Phase 4 scoped-verify
 # gate (prior round 0 CRITICAL + a tests/docs-only fix); a normal round never
 # passes --only, so the core tier stays mandatory there.
-if [ -n "$ONLY" ]; then
+if [ "$ONLY_SET" = "1" ]; then
+  [ -n "$ONLY" ] || die "--only was given an empty role list"
   [ "${#ADDONS[@]}" -eq 0 ] && [ "${#SKIP[@]}" -eq 0 ] || die "--only cannot be combined with --add/--skip"
   IFS=',' read -r -a ROLES <<< "$ONLY"
   CLEANED=()
   for r in "${ROLES[@]}"; do
-    [ -n "$r" ] || continue
+    [ -n "$r" ] || die "--only contains an empty role (a stray comma?) — refusing a malformed scoped batch"
     role_config "$r" >/dev/null || die "--only: unknown role '$r'"
     CLEANED+=("$r")
   done

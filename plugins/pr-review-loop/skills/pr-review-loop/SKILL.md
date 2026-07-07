@@ -407,16 +407,23 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 **When:** Phase 4 sets `SCOPED_NEXT=1` iff the latest review had 0 CRITICAL and `LAST_FIX_CLASS` ∈ {`tests`, `docs`}. Phase 1 Step 0 consumes it into `SCOPED_THIS` and writes `$PACKET/delta.patch` (the fix under verification).
 
 **How a scoped round differs (Phase 1 Steps 2–4):**
-- **Step 2 — agents:** run only `code-reviewer` plus the persona that owns the fix's domain — `test-analyzer` for a `tests` fix, `comment-analyzer` for a `docs` fix. No core tier.
+- **Step 2 — agents:** `code-reviewer` plus the persona that owns the fix's domain, derived from `LAST_FIX_CLASS` — no core tier. **Use this `SCOPED_ROLES` in both Step 3 and Step 4** (don't hardcode `test-analyzer`, or a `docs` fix gets the wrong reviewer):
+  ```bash
+  case "$LAST_FIX_CLASS" in
+    tests) SCOPED_ROLES="code-reviewer,test-analyzer" ;;
+    docs)  SCOPED_ROLES="code-reviewer,comment-analyzer" ;;
+    *)     echo "not scoped-eligible: $LAST_FIX_CLASS" >&2; exit 1 ;;   # Phase 4 gates this; never reached
+  esac
+  ```
 - **Step 3 — prompts:** build with `--scoped` (appends the delta-focus addendum) and `--history` (prior pushbacks still apply); skip `--severity-floor` (the scoped addendum already says "report only if the fix itself is wrong"):
   ```bash
   "$BUILD_PROMPTS" --packet "$PACKET" --out "$ROUND_DIR" \
-    --roles "code-reviewer,test-analyzer" --history "$HISTORY" --scoped
+    --roles "$SCOPED_ROLES" --history "$HISTORY" --scoped
   ```
-- **Step 4 — launch:** `--only` with those exact roles — the one sanctioned path that bypasses core-tier enforcement (a normal round must never pass `--only`):
+- **Step 4 — launch:** `--only "$SCOPED_ROLES"` — the one sanctioned path that bypasses core-tier enforcement (a normal round must never pass `--only`):
   ```bash
   "$LAUNCH_AGENTS" --run-dir "$ROUND_DIR" --repo "$(git rev-parse --show-toplevel)" \
-    --sfh-effort medium --only "code-reviewer,test-analyzer"
+    --sfh-effort medium --only "$SCOPED_ROLES"
   ```
 
 **Outcome (Phase 4):** a clean scoped round → CLEAN exit; any finding → address it in Phase 3, then escalate to a full batch next round. A scoped round never chains into another scoped round.

@@ -68,6 +68,10 @@ if [ "$SEVERITY_FLOOR" -eq 1 ]; then
 fi
 if [ "$SCOPED" -eq 1 ]; then
   [ -f "$PROMPTS_DIR/_scoped.txt" ] || die "missing fragment: _scoped.txt"
+  # Fail closed: a scoped round tells agents to verify $PACKET/delta.patch, so a
+  # missing/empty delta would produce a review of nothing that still reports
+  # clean. Require the delta to exist and be non-empty before building prompts.
+  [ -s "$PACKET/delta.patch" ] || die "--scoped requires a non-empty $PACKET/delta.patch (was the delta written?)"
 fi
 
 mkdir -p "$OUT_DIR"
