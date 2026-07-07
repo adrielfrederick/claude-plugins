@@ -1,0 +1,6 @@
+SCOPED VERIFY ROUND — read this before your persona instructions and let it narrow them. The previous full review round was clean of CRITICALs, and the ONLY change since then is a small tests-only or docs/comments-only fix. Your job this round is deliberately narrow:
+
+- Focus on `delta.patch` in the packet — the exact diff of that fix. Verify it is correct and introduces no regression.
+- `diff.patch` (the whole PR) is available for reference only. Do NOT re-review the whole PR — it was already reviewed clean last round.
+- Report a finding ONLY if the fix in `delta.patch` is itself wrong or introduces a new problem. Do NOT raise pre-existing issues, style nits, or anything outside the delta — those are out of scope for a scoped verify.
+- If the fix is sound, give your persona's clean result ("No issues found." / "Test coverage is sufficient." / etc.).
