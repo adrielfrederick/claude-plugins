@@ -183,6 +183,13 @@ check "extract drops closing marker"      '! grep -qx -- "-->" "$WORK/hist-out.t
 MARKER='🔒 pr-review-loop running on `runnerbox` (auto-removed at loop end) <!-- pr-review-loop:running runnerbox 1783400000 -->'
 check "marker-host parses host"           '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-host)" = "runnerbox" ]'
 check "marker-epoch parses epoch"         '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-epoch)" = "1783400000" ]'
+# marker-blocks decision: exit 0 = block (another active host), exit 1 = proceed
+NOW=1783400300   # 300s after the marker epoch → fresh
+check "fresh other-host marker blocks"    'printf "%s" "$MARKER" | bash "$HIO" marker-blocks laptop  '"$NOW"''
+check "own-host marker proceeds"          '! printf "%s" "$MARKER" | bash "$HIO" marker-blocks runnerbox '"$NOW"''
+check "stale other-host marker proceeds"  '! printf "%s" "$MARKER" | MARKER_MAX_AGE=60 bash "$HIO" marker-blocks laptop '"$NOW"''
+check "malformed marker proceeds"         '! printf "garbage no marker" | bash "$HIO" marker-blocks laptop '"$NOW"''
+check "empty marker proceeds"             '! printf "" | bash "$HIO" marker-blocks laptop '"$NOW"''
 
 echo
 echo "passed=$PASS failed=$FAIL"

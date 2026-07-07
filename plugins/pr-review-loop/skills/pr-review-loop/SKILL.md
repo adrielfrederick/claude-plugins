@@ -95,25 +95,19 @@ If either is missing, stop and tell the user with the install link from the erro
 
    The PR is the durable copy; the local file is just the working copy. This makes pushback history a property of the PR, not the machine that happened to run the last loop.
 
-9. **In-flight guard (don't race another loop).** The runner's workflow `concurrency` serializes runner runs, but nothing stops a laptop loop racing a `review`-label runner loop on the same PR — both would push fixup commits to the same branch. Before starting, check for a fresh marker from a *different* host, then post your own:
+9. **In-flight guard — check (don't race another loop).** The runner's workflow `concurrency` serializes runner runs, but nothing stops a laptop loop racing a `review`-label runner loop on the same PR — both would push fixup commits to the same branch. Here, only *check* for a live loop on another host and abort if found. `marker-blocks` exits 0 when a fresh marker from a different host holds the PR (its 75-min freshness window — just above the whole-loop `TIMEOUT_SECONDS` — treats anything older as a dead run):
 
    ```bash
    HOST="$(hostname)"; NOW="$(date +%s)"
    existing="$(gh pr view "$PR_NUMBER" --json comments \
      -q '[.comments[].body | select(contains("pr-review-loop:running"))] | last // ""' 2>/dev/null)"
-   if [ -n "$existing" ]; then
-     mhost="$(printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-host)"
-     mtime="$(printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-epoch)"
-     if [ -n "$mtime" ] && [ "$mhost" != "$HOST" ] && [ "$(( NOW - mtime ))" -lt 4500 ]; then
-       echo "Another pr-review-loop is running on PR #$PR_NUMBER from '$mhost' ($(( (NOW - mtime) / 60 ))m ago). Aborting to avoid racing fixup pushes. If that run is dead, delete its 'pr-review-loop:running' comment and retry."
-       exit 1
-     fi
+   if [ -n "$existing" ] && printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-blocks "$HOST" "$NOW"; then
+     echo "Another pr-review-loop is running on PR #$PR_NUMBER from another host. Aborting to avoid racing fixup pushes. If that run is dead, delete its 'pr-review-loop:running' comment and retry."
+     exit 1
    fi
-   MARKER_URL="$(gh pr comment "$PR_NUMBER" --body "🔒 pr-review-loop running on \`$HOST\` (auto-removed at loop end) <!-- pr-review-loop:running $HOST $NOW -->")"
-   MARKER_CID="${MARKER_URL##*issuecomment-}"   # numeric id, for deletion in Phase 5
    ```
 
-   The 4500s (75 min) window is just above the whole-loop `TIMEOUT_SECONDS`, so a marker older than that is treated as a dead run, not a live one. Phase 5 deletes this marker.
+   **Do NOT post your own marker here.** Posting is deferred to the end of Phase 0.5 (below) — after the fail-prone setup (base-ref resolution, packet build) has succeeded — so a preflight/setup hard-exit can never leave an orphaned marker that false-blocks the next run for 75 minutes. `MARKER_CID` stays unset until then, so Phase 5's deletion is a safe no-op on any early exit.
 
 ## Phase 0.5: Build the review packet
 
@@ -166,6 +160,13 @@ git diff --stat "$BASE_BRANCH"...HEAD > "$PACKET/changed-files.txt"
 ```
 
 The packet is the agent interface. The assembled agent prompts (see `agent-prompts.md`, built by `build-prompts.sh`) tell agents to read from here — including `manifest.txt` for exact filenames — and forbid whole-file dumps.
+
+**Post the in-flight marker now** (deferred from Phase 0 Step 9 — the fail-prone setup above has succeeded, so from here every exit funnels through Phase 5, which deletes it):
+
+```bash
+MARKER_URL="$(gh pr comment "$PR_NUMBER" --body "🔒 pr-review-loop running on \`$HOST\` (auto-removed at loop end) <!-- pr-review-loop:running $HOST $NOW -->")"
+MARKER_CID="${MARKER_URL##*issuecomment-}"   # numeric id, for deletion in Phase 5
+```
 
 ## Phase 1: Codex review
 
@@ -285,7 +286,7 @@ The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent i
 
 **Run `$LAUNCH_AGENTS` as ONE foreground bash call**, with a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS` (the CI runner sets a high `BASH_DEFAULT_TIMEOUT_MS` for this). The script blocks internally — it launches the batch, then `wait`s until every codex PID has completed or been watchdog-killed, then writes `$ROUND_DIR/.done` — so the whole round stays inside one turn. **Do NOT** background the launch and then stop/yield to "wait" for it: per the Runtime note above, a non-interactive `claude --print` run is never resumed, so a backgrounded batch is orphaned and killed the instant you stop and the loop dies with no summary. (If a single call would exceed your bash tool-timeout, poll in-turn instead: start `$LAUNCH_AGENTS` `nohup`-detached, then loop short `sleep`+check bash calls until `$ROUND_DIR/.done` exists — still never yielding the turn.)
 
-**Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — exit the loop with status `CODEX_DEGRADED` and tell the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
+**Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — set status `CODEX_DEGRADED` and **go to Phase 5** (so the wrap-up posts and the in-flight marker is removed), telling the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
 
 ### Step 5: Read and parse findings
 
@@ -296,7 +297,7 @@ Then read each `$ROUND_DIR/review-{ROLE}.txt` and parse structured findings, cla
 - ends with an `AGENT_FAILED exit=N` line → the agent crashed (also in `.failed`); handle per the paragraph above — **never** count as "no findings."
 - missing or empty with no sentinel and no `.failed` entry → treat as "no findings" (agent ran, said nothing). Because `$ROUND_DIR` is unique per round, a missing file unambiguously means *this round's* agent, not a stale prior-round file.
 
-If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: exit `CODEX_DEGRADED`.
+If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: set `CODEX_DEGRADED` and go to Phase 5 (never exit before Phase 5 once the in-flight marker is posted — Phase 5 removes it).
 
 ## Phase 2: Aggregate findings
 
