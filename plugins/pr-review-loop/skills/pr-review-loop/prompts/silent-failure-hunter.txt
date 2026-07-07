@@ -10,7 +10,7 @@ Review for:
 Output per issue:
 - File: relative path
 - Line: line number
-- Severity: CRITICAL (data loss, security) | IMPORTANT (poor UX, debugging difficulty)
+- Severity: CRITICAL | IMPORTANT — the shared definitions in the packet preamble govern (would a senior reviewer block merge?). CRITICAL: the swallowed error causes data loss or a security hole. IMPORTANT: the hidden failure causes real user-visible misbehavior or serious debugging pain on a path that will actually be hit. A missing log line or theoretical suppression that doesn't clear that bar is a SUGGESTION.
 - Description: what fails silently
 - Failure scenario: the concrete failure that gets swallowed — what goes wrong at runtime, and the user-facing or debugging impact of it being hidden. If you can't name a realistic trigger, omit.
 - Fix: concrete code suggestion

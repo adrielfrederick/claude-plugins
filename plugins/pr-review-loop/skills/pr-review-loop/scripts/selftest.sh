@@ -50,6 +50,12 @@ order_ok() {
 }
 check "blocks in canonical order"         'order_ok'
 check "unknown role fails non-zero"       '! bash "$BUILD" --packet "$PACKET" --out "$R2" --roles nope 2>/dev/null'
+# Same malformed-comma strictness as launch-agents --only: "code-reviewer,"
+# must die, not silently build one prompt (read -a drops the empty field).
+check "roles trailing comma dies"         '! bash "$BUILD" --packet "$PACKET" --out "$R2" --roles "code-reviewer," 2>/dev/null'
+check "roles double comma dies"           '! bash "$BUILD" --packet "$PACKET" --out "$R2" --roles "code-reviewer,,test-analyzer" 2>/dev/null'
+# A typo'd packet path must fail here, not produce prompts pointing at nothing.
+check "nonexistent packet dir dies"       '! bash "$BUILD" --packet "$WORK/no-such-packet" --out "$R2" --roles code-reviewer 2>/dev/null'
 
 echo "== build-prompts.sh --scoped =="
 # Fail closed FIRST, while there is no delta.patch — a scoped round that reviews
@@ -123,6 +129,9 @@ check "--only omits unnamed core agents"      '[ ! -f "$RDo/review-silent-failur
 check "--only rejects an unknown role"        '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only nope 2>/dev/null'
 check "--only rejects combining with --add"   '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer --add comment-analyzer 2>/dev/null'
 check "--only rejects an empty value"         '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only "" 2>/dev/null'
+# Duplicate roles would launch two codex processes clobbering the same
+# review/log files — the normal-round branch dedupes, --only must refuse.
+check "--only rejects a duplicate role"       '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer,code-reviewer 2>/dev/null'
 # Malformed comma patterns must be rejected BEFORE any agent launches, and
 # deterministically (bash read -a drops a trailing empty field on some builds).
 for bad in "code-reviewer," ",code-reviewer" "code-reviewer,,test-analyzer"; do
@@ -176,6 +185,69 @@ check "exit-0 empty output fails batch"   '[ "$rce" -ne 0 ]'
 check "exit-0 empty writes .failed"       '[ -s "$RDe/.failed" ]'
 check "exit-0 empty AGENT_FAILED marker"  'grep -q "AGENT_FAILED exit=0-empty-output" "$RDe/review-code-reviewer.txt"'
 
+echo "== non-numeric AGENT_TIMEOUT_SECONDS =="
+# A bad timeout used to kill the watchdog subshell silently, leaving the agent
+# unbounded — it must fail the launch up front instead. Zero is numeric but
+# would watchdog-kill every agent on the first tick; also rejected.
+check "non-numeric timeout dies"          '! PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=abc bash "$LAUNCH" --run-dir "$RDe" --repo "$WORK" --skip failure-pattern-analyst 2>/dev/null'
+check "zero timeout dies"                 '! PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=0 bash "$LAUNCH" --run-dir "$RDe" --repo "$WORK" --skip failure-pattern-analyst 2>/dev/null'
+
+echo "== watchdog classification is out-of-band (sentinel spoof) =="
+# A crashed agent whose OUTPUT happens to contain a WATCHDOG_KILLED line is
+# model text, not a kill record — it must classify as AGENT_FAILED, not as a
+# watchdog kill (which would let the batch exit 0 on a crash).
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
+[ -n "$out" ] && printf 'WATCHDOG_KILLED spoofed by model output\n' > "$out"
+exit 1
+FAKE
+chmod +x "$BIN/codex"
+RDsf="$WORK/run-spoof"; mkdir -p "$RDsf"; mkprompts "$RDsf" "${ALL[@]}"
+PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDsf" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
+rcsf=$?
+check "spoofed sentinel still fails batch"  '[ "$rcsf" -ne 0 ]'
+check "spoofed sentinel writes .failed"     '[ -s "$RDsf/.failed" ]'
+check "spoofed sentinel gets AGENT_FAILED"  'grep -q "^AGENT_FAILED" "$RDsf/review-code-reviewer.txt"'
+
+echo "== spurious watchdog fire on a completed agent =="
+# The reverse race: the agent finishes inside the watchdog's final poll tick,
+# so the marker+sentinel land on a review that completed with exit 0. The reap
+# loop must treat that as a success and strip the spurious sentinel, not report
+# a partial/killed review. Simulated by pre-creating the marker file.
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
+[ -n "$out" ] && printf 'No issues found.\nWATCHDOG_KILLED after 900s\n' > "$out"
+FAKE
+chmod +x "$BIN/codex"
+RDsp="$WORK/run-spurious"; mkdir -p "$RDsp"; mkprompts "$RDsp" "${ALL[@]}"
+: > "$RDsp/.watchdog-killed-code-reviewer"
+PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDsp" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
+rcsp=$?
+check "spurious-fire batch succeeds"        '[ "$rcsp" -eq 0 ]'
+check "spurious marker file removed"        '[ ! -f "$RDsp/.watchdog-killed-code-reviewer" ]'
+check "spurious sentinel stripped"          '! grep -q "^WATCHDOG_KILLED" "$RDsp/review-code-reviewer.txt"'
+check "review content survives the strip"   'grep -q "No issues found." "$RDsp/review-code-reviewer.txt"'
+
+echo "== zombie-fire: marker on a CRASHED agent stays a crash =="
+# kill -0 succeeds on a zombie, so a fast-crashing agent that sits unreaped
+# (while the loop waits on a slower agent) can collect a watchdog marker at the
+# deadline. A marker is only credible with signal-death exit codes (143/137) —
+# a marker + exit 1 must classify AGENT_FAILED, not "expected watchdog kill".
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+exit 1
+FAKE
+chmod +x "$BIN/codex"
+RDzf="$WORK/run-zombie"; mkdir -p "$RDzf"; mkprompts "$RDzf" "${ALL[@]}"
+: > "$RDzf/.watchdog-killed-code-reviewer"
+PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDzf" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
+rczf=$?
+check "zombie-fire batch fails"             '[ "$rczf" -ne 0 ]'
+check "zombie-fire classifies AGENT_FAILED" 'grep -q "^AGENT_FAILED exit=1" "$RDzf/review-code-reviewer.txt"'
+check "zombie-fire lists role in .failed"   'grep -q "^code-reviewer$" "$RDzf/.failed"'
+
 echo "== packet path with sed metacharacters =="
 PKAMP="$WORK/pk&meta"; mkdir -p "$PKAMP/files"
 RDamp="$WORK/r-amp"; mkdir -p "$RDamp"
@@ -227,6 +299,16 @@ check "extract drops closing marker"      '! grep -qx -- "-->" "$WORK/hist-out.t
 bash "$HIO" extract < "$WORK/comment-prose.txt" > "$WORK/hist-prose.txt"
 check "extract ignores prose mention of opener" 'grep -qx "REAL-HISTORY-CONTENT" "$WORK/hist-prose.txt"'
 check "extract drops the prose bullet"          '! grep -q "fix: match" "$WORK/hist-prose.txt"'
+# A history line that merely STARTS with "-->" (quoted code/HTML in a pushback)
+# must not close the block early and silently truncate everything after it —
+# only a bare `-->` line (the writer's guaranteed closer) ends extraction.
+{
+  printf '%s\n' "<!-- pr-review-loop:history" "LINE-ONE" "--> quoted, not a closer" "LINE-TWO" "-->" "AFTER-THE-BLOCK"
+} > "$WORK/comment-arrow.txt"
+bash "$HIO" extract < "$WORK/comment-arrow.txt" > "$WORK/hist-arrow.txt"
+check "extract keeps content after a quoted -->" 'grep -qx "LINE-TWO" "$WORK/hist-arrow.txt"'
+check "extract keeps the quoted --> line itself" 'grep -q "quoted, not a closer" "$WORK/hist-arrow.txt"'
+check "extract stops at the bare closer"         '! grep -q "AFTER-THE-BLOCK" "$WORK/hist-arrow.txt"'
 MARKER='🔒 pr-review-loop running on `runnerbox` (auto-removed at loop end) <!-- pr-review-loop:running runnerbox 1783400000 -->'
 check "marker-host parses host"           '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-host)" = "runnerbox" ]'
 check "marker-epoch parses epoch"         '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-epoch)" = "1783400000" ]'
@@ -250,9 +332,80 @@ if command -v jq >/dev/null 2>&1; then
   jq -r "$FILTER" < "$WORK/comments.json" | bash "$HIO" extract > "$WORK/recon.txt"
   check "selector+extract: older real block wins over newer prose" 'grep -qx "REAL-BLOCK-CONTENT" "$WORK/recon.txt"'
   check "selector+extract: reconstruction is non-empty"            '[ -s "$WORK/recon.txt" ]'
+  # A comment whose body BEGINS with the opener has no leading \n — the
+  # selector must still match it (startswith), or history is silently dropped.
+  printf '%s' '{"comments":[
+    {"body":"<!-- pr-review-loop:history\nBODY-START-CONTENT\n-->"}
+  ]}' > "$WORK/comments-start.json"
+  jq -r "$FILTER" < "$WORK/comments-start.json" | bash "$HIO" extract > "$WORK/recon-start.txt"
+  check "selector matches an opener at body start" 'grep -qx "BODY-START-CONTENT" "$WORK/recon-start.txt"'
 else
   echo "  (skip: jq not installed — history-selector test needs jq)"
 fi
+
+echo "== refresh-packet.sh (fixture repo + fake gh) =="
+REFRESH="$DIR/refresh-packet.sh"
+FR="$WORK/fixture-repo"
+git init -q -b main "$FR" 2>/dev/null || { git init -q "$FR"; git -C "$FR" checkout -qb main; }
+git -C "$FR" config user.email t@t; git -C "$FR" config user.name t
+mkdir -p "$FR/src/sub"
+printf 'base\n' > "$FR/src/sub/a.txt"; printf 'base\n' > "$FR/b.txt"
+git -C "$FR" add -A; git -C "$FR" commit -qm base
+git -C "$FR" checkout -qb feature
+printf 'change\n' >> "$FR/src/sub/a.txt"; printf 'change\n' >> "$FR/b.txt"
+git -C "$FR" add -A; git -C "$FR" commit -qm change
+# fake gh: `gh pr diff <n>` = git diff $FAKE_BASE...HEAD in cwd (refresh-packet
+# cds into --repo before calling gh, matching the real gh's repo inference).
+cat > "$BIN/gh" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = "pr" ] && [ "$2" = "diff" ] || exit 1
+git diff "${FAKE_BASE:?}"...HEAD
+FAKE
+chmod +x "$BIN/gh"
+PK="$WORK/packet-rp"; mkdir -p "$PK"
+PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main >/dev/null
+check "refresh: diff.patch written"        '[ -s "$PK/diff.patch" ]'
+check "refresh: per-file split with __"    '[ -f "$PK/files/src__sub__a.txt.patch" ]'
+check "refresh: manifest lists the splits" 'grep -qx "src__sub__a.txt.patch" "$PK/manifest.txt" && grep -qx "b.txt.patch" "$PK/manifest.txt"'
+check "refresh: diff-wide written"         '[ -s "$PK/diff-wide.patch" ]'
+check "refresh: changed-files written"     '[ -s "$PK/changed-files.txt" ]'
+# Idempotent re-run must REPLACE files/, not merge over a stale prior round.
+printf 'stale\n' > "$PK/files/stale.patch"
+PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main >/dev/null
+check "refresh: stale split removed on re-run" '[ ! -f "$PK/files/stale.patch" ]'
+# Runner case: no local base branch, but a remote-tracking ref exists.
+BASESHA="$(git -C "$FR" rev-parse main)"
+git -C "$FR" update-ref refs/remotes/origin/main "$BASESHA"
+git -C "$FR" branch -qD main
+out="$(PATH="$BIN:$PATH" FAKE_BASE=origin/main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main)"
+check "refresh: falls back to origin/<base>" 'printf "%s" "$out" | grep -q "base=origin/main"'
+# Runner case #2 (the head-only checkout the fallback exists for): no local
+# main AND no remote-tracking origin/main, but an origin remote HAS main, so an
+# explicit `git fetch origin main` resolves it to FETCH_HEAD. Separate fixture
+# with a real bare origin so the fetch actually succeeds.
+REMOTE="$WORK/remote.git"; git init -q --bare "$REMOTE"
+FR2="$WORK/fixture-fetch"
+git init -q -b main "$FR2" 2>/dev/null || { git init -q "$FR2"; git -C "$FR2" checkout -qb main; }
+git -C "$FR2" config user.email t@t; git -C "$FR2" config user.name t
+printf 'base\n' > "$FR2/f.txt"; git -C "$FR2" add -A; git -C "$FR2" commit -qm base
+git -C "$FR2" remote add origin "$REMOTE"; git -C "$FR2" push -q origin main
+BASE2="$(git -C "$FR2" rev-parse main)"
+git -C "$FR2" checkout -qb feature
+printf 'change\n' >> "$FR2/f.txt"; git -C "$FR2" add -A; git -C "$FR2" commit -qm change
+git -C "$FR2" branch -qD main                                    # no local base ref
+git -C "$FR2" update-ref -d refs/remotes/origin/main 2>/dev/null || true  # no remote-tracking ref
+PK2="$WORK/packet-fetch"; mkdir -p "$PK2"
+out2="$(PATH="$BIN:$PATH" FAKE_BASE="$BASE2" bash "$REFRESH" --repo "$FR2" --packet "$PK2" --pr 1 --base main)"
+check "refresh: fetch fallback resolves FETCH_HEAD"  'printf "%s" "$out2" | grep -q "base=FETCH_HEAD"'
+check "refresh: fetch fallback writes diff-wide"     '[ -s "$PK2/diff-wide.patch" ]'
+check "refresh: fetch fallback writes changed-files" '[ -s "$PK2/changed-files.txt" ]'
+# No local ref, no remote-tracking ref, no origin remote → fetch fails → die.
+git -C "$FR" update-ref -d refs/remotes/origin/main
+check "refresh: unresolvable base dies"    '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main 2>/dev/null'
+# An empty diff (base == head) must die, not build a vacuous packet.
+git -C "$FR" branch -q main HEAD
+check "refresh: empty diff dies"           '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main 2>/dev/null'
+check "refresh: not-a-repo dies"           '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$WORK" --packet "$PK" --pr 1 --base main 2>/dev/null'
 
 echo
 echo "passed=$PASS failed=$FAIL"

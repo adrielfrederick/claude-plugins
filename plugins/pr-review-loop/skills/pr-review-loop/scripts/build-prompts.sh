@@ -10,8 +10,9 @@
 #   1. _packet.txt            ({PACKET_PATH} → --packet)          — always
 #   2. _history.txt + history file contents                       — if --history
 #   3. --context file contents (under a fixed header)             — if --context
-#   4. <role>.txt persona                                         — always
-#   5. _severity-floor.txt                                        — if --severity-floor
+#   4. _scoped.txt scoped-verify addendum                         — if --scoped
+#   5. <role>.txt persona                                         — always
+#   6. _severity-floor.txt                                        — if --severity-floor
 #
 # Blocks are joined by a line containing only `---`.
 #
@@ -53,6 +54,13 @@ done
 [ -n "$PACKET" ]  || die "--packet is required"
 [ -n "$OUT_DIR" ] || die "--out is required"
 [ -n "$ROLES" ]   || die "--roles is required"
+[ -d "$PACKET" ]  || die "packet dir not found: $PACKET (a typo here would build prompts pointing at nothing)"
+# Same malformed-comma rejection as launch-agents.sh --only: bash read -a drops
+# a trailing empty field on some builds, so "code-reviewer," would silently
+# build one prompt instead of failing.
+case "$ROLES" in
+  ,*|*,|*,,*) die "--roles has an empty role (leading/trailing/double comma): '$ROLES'" ;;
+esac
 [ -d "$PROMPTS_DIR" ] || die "prompts dir not found: $PROMPTS_DIR"
 [ -f "$PROMPTS_DIR/_packet.txt" ] || die "missing fragment: _packet.txt"
 
@@ -82,12 +90,11 @@ sep() { printf '\n---\n'; }
 # fails the whole call instead of leaving some prompts written and some not.
 IFS=',' read -r -a ROLE_ARR <<< "$ROLES"
 for role in "${ROLE_ARR[@]}"; do
-  [ -n "$role" ] || continue
+  [ -n "$role" ] || die "--roles contains an empty role"
   [ -f "$PROMPTS_DIR/$role.txt" ] || die "unknown role '$role' (no $role.txt fragment)"
 done
 
 for role in "${ROLE_ARR[@]}"; do
-  [ -n "$role" ] || continue
   out="$OUT_DIR/prompt-$role.txt"
   {
     # 1. Packet block, with the packet path substituted. Bash literal
@@ -111,19 +118,19 @@ for role in "${ROLE_ARR[@]}"; do
       cat "$CONTEXT_FILE"
     fi
 
-    # 3.5 Scoped-verify addendum — narrows the persona to just the delta.
+    # 4. Scoped-verify addendum — narrows the persona to just the delta.
     if [ "$SCOPED" -eq 1 ]; then
       sep
       cat "$PROMPTS_DIR/_scoped.txt"
     fi
 
-    # 4. Persona.
+    # 5. Persona.
     sep
     cat "$PROMPTS_DIR/$role.txt"
 
-    # 5. Rising severity floor.
+    # 6. Rising severity floor.
     if [ "$SEVERITY_FLOOR" -eq 1 ]; then
-      printf '\n'
+      sep
       cat "$PROMPTS_DIR/_severity-floor.txt"
     fi
   } > "$out"

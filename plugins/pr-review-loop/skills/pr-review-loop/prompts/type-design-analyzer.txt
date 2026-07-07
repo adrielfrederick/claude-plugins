@@ -9,7 +9,7 @@ Review for:
 Output per issue:
 - File: relative path
 - Line: line number
-- Severity: CRITICAL (invariant violation possible) | IMPORTANT (weak encapsulation)
+- Severity: CRITICAL | IMPORTANT — the shared definitions in the packet preamble govern (would a senior reviewer block merge?). CRITICAL: an invariant violation a real caller can reach today. IMPORTANT: a reachable bad state serious enough to block on. Weak encapsulation with no reachable bad state is a SUGGESTION, not IMPORTANT.
 - Description: the type-design problem
 - Failure scenario: the illegal state that becomes representable and the concrete construction or mutation path that reaches it. If no caller can actually reach the bad state, downgrade or omit.
 - Fix: improved type definition or validation
