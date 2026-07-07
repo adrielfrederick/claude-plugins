@@ -52,15 +52,19 @@ check "blocks in canonical order"         'order_ok'
 check "unknown role fails non-zero"       '! bash "$BUILD" --packet "$PACKET" --out "$R2" --roles nope 2>/dev/null'
 
 echo "== persona content (review-quality fields) =="
-CR="$R/prompt-code-reviewer.txt"
-check "code-reviewer has failure_scenario" 'grep -qi "Failure scenario:" "$CR"'
-check "code-reviewer has removed-behavior" 'grep -qi "Removed-behavior audit" "$CR"'
-check "code-reviewer has cross-file trace" 'grep -qi "Cross-file trace" "$CR"'
 RC="$WORK/r-content"; mkdir -p "$RC"
-bash "$BUILD" --packet "$PACKET" --out "$RC" --roles comment-analyzer,code-simplifier,test-analyzer >/dev/null
+bash "$BUILD" --packet "$PACKET" --out "$RC" \
+  --roles code-reviewer,test-analyzer,silent-failure-hunter,type-design-analyzer,comment-analyzer,code-simplifier,failure-pattern-analyst >/dev/null
+# EVERY persona that now requires a failure-scenario/cost line is checked — a
+# regression dropping it from any one of them must fail the suite.
+for r in code-reviewer test-analyzer silent-failure-hunter type-design-analyzer comment-analyzer code-simplifier; do
+  check "$r has failure_scenario field" 'grep -qi "Failure scenario" "$RC/prompt-'"$r"'.txt"'
+done
+check "failure-pattern-analyst has failure scenario" 'grep -qi "failure scenario" "$RC/prompt-failure-pattern-analyst.txt"'
+check "code-reviewer has removed-behavior" 'grep -qi "Removed-behavior audit" "$RC/prompt-code-reviewer.txt"'
+check "code-reviewer has cross-file trace" 'grep -qi "Cross-file trace" "$RC/prompt-code-reviewer.txt"'
 check "comment-analyzer severity aligned"  'grep -qi "ACTIVELY MISLEADING" "$RC/prompt-comment-analyzer.txt"'
 check "code-simplifier caps at SUGGESTION" 'grep -qi "default to SUGGESTION" "$RC/prompt-code-simplifier.txt"'
-check "test-analyzer has failure_scenario" 'grep -qi "Failure scenario:" "$RC/prompt-test-analyzer.txt"'
 
 echo "== launch-agents.sh (fake codex) =="
 BIN="$WORK/bin"; mkdir -p "$BIN"
