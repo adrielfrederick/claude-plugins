@@ -89,13 +89,13 @@ If either is missing, stop and tell the user with the install link from the erro
      # and clobber the real history. Only overwrite if extraction is non-empty.
      # Warn (don't silently swallow) if the read fails — losing prior pushbacks
      # silently is exactly the non-convergence this feature exists to prevent.
-     # `contains("\n<!-- ...")` requires the opener at a LINE START, so a comment
-     # that only quotes the token in prose can't be selected by `last` over an
-     # older comment holding the real block (loop wrap-ups always emit the opener
-     # on its own line, preceded by earlier sections). Extraction is anchored the
-     # same way — both ends of the round-trip require a real opener.
+     # The selector (history-io.sh history-filter, tested by selftest.sh) requires
+     # the opener at a LINE START, so a comment that only quotes the token in
+     # prose can't be selected by `last` over an older comment holding the real
+     # block. Extraction is anchored the same way — both ends of the round-trip
+     # require a real opener, and both come from the one tested source.
      if ! body="$(gh pr view "$PR_NUMBER" --json comments \
-       -q '[.comments[].body | select(contains("\n<!-- pr-review-loop:history"))] | last // ""' 2>&1)"; then
+       -q "$("$HISTORY_IO" history-filter)" 2>&1)"; then
        echo "Warning: couldn't read PR comments to reconstruct review history ($body) — proceeding without prior pushback history." >&2
        body=""
      fi

@@ -200,6 +200,22 @@ check "own-host marker proceeds"          '! printf "%s" "$MARKER" | bash "$HIO"
 check "stale other-host marker proceeds"  '! printf "%s" "$MARKER" | MARKER_MAX_AGE=60 bash "$HIO" marker-blocks laptop '"$NOW"''
 check "malformed marker proceeds"         '! printf "garbage no marker" | bash "$HIO" marker-blocks laptop '"$NOW"''
 check "empty marker proceeds"             '! printf "" | bash "$HIO" marker-blocks laptop '"$NOW"''
+# The history-selection jq predicate (used by SKILL.md via `gh -q`) is the same
+# string selftest runs through `jq` — so selector + extractor are covered end to
+# end and can't drift. A NEWER prose-only comment must NOT win over an older real
+# block. Skips only if jq is unavailable.
+if command -v jq >/dev/null 2>&1; then
+  FILTER="$(bash "$HIO" history-filter)"
+  printf '%s' '{"comments":[
+    {"body":"CLAUDE: summary\n\n<!-- pr-review-loop:history\nREAL-BLOCK-CONTENT\n-->"},
+    {"body":"a human says: fixed by matching the <!-- pr-review-loop:history opener"}
+  ]}' > "$WORK/comments.json"
+  jq -r "$FILTER" < "$WORK/comments.json" | bash "$HIO" extract > "$WORK/recon.txt"
+  check "selector+extract: older real block wins over newer prose" 'grep -qx "REAL-BLOCK-CONTENT" "$WORK/recon.txt"'
+  check "selector+extract: reconstruction is non-empty"            '[ -s "$WORK/recon.txt" ]'
+else
+  echo "  (skip: jq not installed — history-selector test needs jq)"
+fi
 
 echo
 echo "passed=$PASS failed=$FAIL"

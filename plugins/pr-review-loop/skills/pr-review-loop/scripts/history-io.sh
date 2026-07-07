@@ -31,6 +31,14 @@ case "${1:-}" in
     # extraction early — only the real standalone opener line does.
     awk '/^<!-- pr-review-loop:history/{f=1;next} /^-->/{f=0;next} f'
     ;;
+  history-filter)
+    # The jq/gh-`-q` predicate that selects the newest PR comment holding a REAL
+    # history block. Single source of truth: SKILL.md Phase 0 passes this to
+    # `gh ... -q`, and selftest.sh runs it through `jq` — so the two can't drift.
+    # `\n<!-- ...` requires the opener at a line start, so a prose-only mention
+    # is never selected over an older comment with the real block.
+    printf '%s' '[.comments[].body | select(contains("\n<!-- pr-review-loop:history"))] | last // ""'
+    ;;
   marker-host)  parse_host ;;
   marker-epoch) parse_epoch ;;
   marker-blocks)
