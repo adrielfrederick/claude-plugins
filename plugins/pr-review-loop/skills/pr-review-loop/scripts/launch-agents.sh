@@ -59,10 +59,12 @@ done
 [ -d "$RUN_DIR" ] || die "run dir not found: $RUN_DIR"
 case "$SFH_EFFORT" in high|medium) ;; *) die "--sfh-effort must be high or medium" ;; esac
 # A non-numeric timeout would kill the watchdog subshell on arithmetic
-# expansion and let the agent run unbounded, with the error invisible.
+# expansion and let the agent run unbounded, with the error invisible; a zero
+# timeout would watchdog-kill every agent on the first tick.
 case "$AGENT_TIMEOUT_SECONDS" in
   ''|*[!0-9]*) die "AGENT_TIMEOUT_SECONDS must be a positive integer (got '$AGENT_TIMEOUT_SECONDS')" ;;
 esac
+[ "$AGENT_TIMEOUT_SECONDS" -gt 0 ] || die "AGENT_TIMEOUT_SECONDS must be > 0 (got '$AGENT_TIMEOUT_SECONDS')"
 
 # Per-role config: "sandbox|model-flag|effort". silent-failure-hunter's effort
 # is overridden from --sfh-effort below.
@@ -268,7 +270,13 @@ for entry in "${AGENT_PIDS[@]}"; do
       FAILED+=("$role")
     fi
   else
-    if [ -f "$RUN_DIR/.watchdog-killed-$role" ]; then
+    # A watchdog kill is only credible if the agent actually died by signal
+    # (TERM→143, KILL→137). `kill -0` succeeds on a ZOMBIE, so an agent that
+    # crashed fast (exit 1) but sat unreaped while we waited on a slower agent
+    # can still get a marker when its watchdog hits the deadline — without the
+    # exit-code check that crash would be classified as an expected kill, the
+    # batch would exit 0, and the crash cause (bad flag, auth) would be hidden.
+    if [ -f "$RUN_DIR/.watchdog-killed-$role" ] && { [ "$agent_rc" -eq 143 ] || [ "$agent_rc" -eq 137 ]; }; then
       :   # expected watchdog kill of a stalled agent (marker kept for debugging)
     else
       printf '\nAGENT_FAILED exit=%s\n' "$agent_rc" >> "$RUN_DIR/review-$role.txt"

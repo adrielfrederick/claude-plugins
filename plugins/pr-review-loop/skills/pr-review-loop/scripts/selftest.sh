@@ -187,8 +187,10 @@ check "exit-0 empty AGENT_FAILED marker"  'grep -q "AGENT_FAILED exit=0-empty-ou
 
 echo "== non-numeric AGENT_TIMEOUT_SECONDS =="
 # A bad timeout used to kill the watchdog subshell silently, leaving the agent
-# unbounded — it must fail the launch up front instead.
+# unbounded — it must fail the launch up front instead. Zero is numeric but
+# would watchdog-kill every agent on the first tick; also rejected.
 check "non-numeric timeout dies"          '! PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=abc bash "$LAUNCH" --run-dir "$RDe" --repo "$WORK" --skip failure-pattern-analyst 2>/dev/null'
+check "zero timeout dies"                 '! PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=0 bash "$LAUNCH" --run-dir "$RDe" --repo "$WORK" --skip failure-pattern-analyst 2>/dev/null'
 
 echo "== watchdog classification is out-of-band (sentinel spoof) =="
 # A crashed agent whose OUTPUT happens to contain a WATCHDOG_KILLED line is
@@ -227,6 +229,24 @@ check "spurious-fire batch succeeds"        '[ "$rcsp" -eq 0 ]'
 check "spurious marker file removed"        '[ ! -f "$RDsp/.watchdog-killed-code-reviewer" ]'
 check "spurious sentinel stripped"          '! grep -q "^WATCHDOG_KILLED" "$RDsp/review-code-reviewer.txt"'
 check "review content survives the strip"   'grep -q "No issues found." "$RDsp/review-code-reviewer.txt"'
+
+echo "== zombie-fire: marker on a CRASHED agent stays a crash =="
+# kill -0 succeeds on a zombie, so a fast-crashing agent that sits unreaped
+# (while the loop waits on a slower agent) can collect a watchdog marker at the
+# deadline. A marker is only credible with signal-death exit codes (143/137) —
+# a marker + exit 1 must classify AGENT_FAILED, not "expected watchdog kill".
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+exit 1
+FAKE
+chmod +x "$BIN/codex"
+RDzf="$WORK/run-zombie"; mkdir -p "$RDzf"; mkprompts "$RDzf" "${ALL[@]}"
+: > "$RDzf/.watchdog-killed-code-reviewer"
+PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDzf" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
+rczf=$?
+check "zombie-fire batch fails"             '[ "$rczf" -ne 0 ]'
+check "zombie-fire classifies AGENT_FAILED" 'grep -q "^AGENT_FAILED exit=1" "$RDzf/review-code-reviewer.txt"'
+check "zombie-fire lists role in .failed"   'grep -q "^code-reviewer$" "$RDzf/.failed"'
 
 echo "== packet path with sed metacharacters =="
 PKAMP="$WORK/pk&meta"; mkdir -p "$PKAMP/files"

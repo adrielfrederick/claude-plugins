@@ -71,7 +71,8 @@ If either is missing, stop and tell the user with the install link from the erro
    # Depth 4 = /tmp/pr-review/<owner__repo>/<PR>/runs/<RUN_ID>. history.md sits at depth 3 and is preserved.
    find /tmp/pr-review -mindepth 4 -maxdepth 4 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
    # Legacy pre-0.7.0 layout (/tmp/pr-review/<PR>/ with no repo slug): GC whole PR dirs.
-   find /tmp/pr-review -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+   # ! -name '*__*' so a digit-leading repo namespace (e.g. 37signals__rails) is never matched.
+   find /tmp/pr-review -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' ! -name '*__*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
    # Namespace by repo, not just PR number: a long-lived runner container hosts
    # several repos on ONE /tmp, so two repos' PR #12 must never share state — a
@@ -177,6 +178,11 @@ The packet is the agent interface. The assembled agent prompts (see `agent-promp
 **Post the in-flight marker now** (deferred from Phase 0 Step 9 — the fail-prone setup above has succeeded, so from here every exit funnels through Phase 5, which deletes it):
 
 ```bash
+# Self-derive HOST/NOW — do NOT reuse Phase 0 Step 9's values: this snippet runs
+# in a fresh shell (empty expansions would post a malformed marker that silently
+# defeats the guard for other hosts), and the 75-min freshness window should
+# start at posting time anyway, not at the earlier check.
+HOST="$(hostname)"; NOW="$(date +%s)"
 MARKER_URL="$(gh pr comment "$PR_NUMBER" --body "🔒 pr-review-loop running on \`$HOST\` (auto-removed at loop end) <!-- pr-review-loop:running $HOST $NOW -->")"
 MARKER_CID="${MARKER_URL##*issuecomment-}"   # numeric id, for deletion in Phase 5
 printf '%s\n' "$MARKER_CID" > "$PR_ROOT/marker-cid"   # persist: Phase 5 runs in a fresh shell
