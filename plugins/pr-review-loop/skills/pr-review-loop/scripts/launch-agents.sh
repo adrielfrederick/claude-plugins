@@ -33,6 +33,8 @@ REPO=""
 SFH_EFFORT="high"
 ADDONS=()
 SKIP=()
+ONLY=""
+ONLY_SET=0
 : "${AGENT_TIMEOUT_SECONDS:=900}"
 
 die() { echo "launch-agents.sh: $*" >&2; exit 1; }
@@ -44,6 +46,7 @@ while [ $# -gt 0 ]; do
     --sfh-effort) SFH_EFFORT="${2:-}"; shift 2 ;;
     --add)        ADDONS+=("${2:-}"); shift 2 ;;
     --skip)       SKIP+=("${2:-}"); shift 2 ;;
+    --only)       ONLY="${2:-}"; ONLY_SET=1; shift 2 ;;
     *)            die "unknown argument: $1" ;;
   esac
 done
@@ -68,8 +71,36 @@ role_config() {
   esac
 }
 
-# ── Assemble the role list: core tier + default failure-pattern-analyst + add-ons ──
 CORE=(code-reviewer test-analyzer silent-failure-hunter type-design-analyzer)
+
+# ── --only: run EXACTLY the named roles (scoped verify rounds). This is the one
+# path that bypasses core-tier enforcement — deliberately, because a scoped
+# verify re-checks a tests/docs-only fix on the delta with 2 agents, not the
+# full tier. The orchestrator only reaches it via the Phase 4 scoped-verify
+# gate (prior round 0 CRITICAL + a tests/docs-only fix); a normal round never
+# passes --only, so the core tier stays mandatory there.
+if [ "$ONLY_SET" = "1" ]; then
+  [ -n "$ONLY" ] || die "--only was given an empty role list"
+  [ "${#ADDONS[@]}" -eq 0 ] && [ "${#SKIP[@]}" -eq 0 ] || die "--only cannot be combined with --add/--skip"
+  # Reject malformed comma patterns on the RAW string, deterministically — bash
+  # `read -a` drops a trailing empty field on some builds, so a trailing comma
+  # ("code-reviewer,") could otherwise slip through and silently run one agent.
+  case "$ONLY" in
+    ,*|*,|*,,*) die "--only has an empty role (leading/trailing/double comma): '$ONLY'" ;;
+  esac
+  IFS=',' read -r -a ROLES <<< "$ONLY"
+  CLEANED=()
+  for r in "${ROLES[@]}"; do
+    [ -n "$r" ] || die "--only contains an empty role (a stray comma?) — refusing a malformed scoped batch"
+    role_config "$r" >/dev/null || die "--only: unknown role '$r'"
+    CLEANED+=("$r")
+  done
+  [ "${#CLEANED[@]}" -gt 0 ] || die "--only given but no valid roles"
+  ROLES=("${CLEANED[@]}")
+  echo "SCOPED verify batch (exact roles, core tier intentionally not enforced): ${ROLES[*]}"
+else
+
+# ── Normal round: core tier + default failure-pattern-analyst + add-ons ──
 ROLES=("${CORE[@]}" failure-pattern-analyst)
 
 for a in "${ADDONS[@]:-}"; do
@@ -102,6 +133,8 @@ for r in "${ROLES[@]}"; do
   FINAL+=("$r")
 done
 ROLES=("${FINAL[@]}")
+
+fi   # end --only vs normal-round assembly
 
 # Pre-flight: every selected role needs a prompt file and a known config.
 for role in "${ROLES[@]}"; do

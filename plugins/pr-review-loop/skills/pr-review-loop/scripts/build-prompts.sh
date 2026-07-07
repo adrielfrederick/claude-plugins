@@ -33,6 +33,7 @@ ROLES=""
 HISTORY_FILE=""
 CONTEXT_FILE=""
 SEVERITY_FLOOR=0
+SCOPED=0
 
 die() { echo "build-prompts.sh: $*" >&2; exit 1; }
 
@@ -44,6 +45,7 @@ while [ $# -gt 0 ]; do
     --history)        HISTORY_FILE="${2:-}"; shift 2 ;;
     --context)        CONTEXT_FILE="${2:-}"; shift 2 ;;
     --severity-floor) SEVERITY_FLOOR=1; shift ;;
+    --scoped)         SCOPED=1; shift ;;
     *)                die "unknown argument: $1" ;;
   esac
 done
@@ -63,6 +65,13 @@ if [ -n "$CONTEXT_FILE" ]; then
 fi
 if [ "$SEVERITY_FLOOR" -eq 1 ]; then
   [ -f "$PROMPTS_DIR/_severity-floor.txt" ] || die "missing fragment: _severity-floor.txt"
+fi
+if [ "$SCOPED" -eq 1 ]; then
+  [ -f "$PROMPTS_DIR/_scoped.txt" ] || die "missing fragment: _scoped.txt"
+  # Fail closed: a scoped round tells agents to verify $PACKET/delta.patch, so a
+  # missing/empty delta would produce a review of nothing that still reports
+  # clean. Require the delta to exist and be non-empty before building prompts.
+  [ -s "$PACKET/delta.patch" ] || die "--scoped requires a non-empty $PACKET/delta.patch (was the delta written?)"
 fi
 
 mkdir -p "$OUT_DIR"
@@ -100,6 +109,12 @@ for role in "${ROLE_ARR[@]}"; do
       sep
       printf '## This PR — scope & non-goals (orchestrator note)\n\n'
       cat "$CONTEXT_FILE"
+    fi
+
+    # 3.5 Scoped-verify addendum — narrows the persona to just the delta.
+    if [ "$SCOPED" -eq 1 ]; then
+      sep
+      cat "$PROMPTS_DIR/_scoped.txt"
     fi
 
     # 4. Persona.

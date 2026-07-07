@@ -16,6 +16,7 @@ Shared blocks (prefixed `_`):
 | `_packet.txt` | Review Packet Usage + read discipline + severity discipline. Contains a `{PACKET_PATH}` placeholder the script substitutes. Prepended to **every** agent. |
 | `_history.txt` | "How to Use Prior Review History" preamble. Included only when a `--history` file is passed (ITERATION > 0). The actual history contents are appended verbatim after it by the script — there is no `{HISTORY_CONTENTS}` placeholder. |
 | `_severity-floor.txt` | The rising-severity-floor instruction. Appended only when `--severity-floor` is passed (see SKILL.md Phase 4). |
+| `_scoped.txt` | The scoped-verify addendum — narrows the persona to just `delta.patch`. Inserted before the persona only when `--scoped` is passed (scoped verify rounds; see SKILL.md "Scoped verify rounds"). |
 
 Personas (one file per agent, the filename is the role name):
 `code-reviewer.txt`, `test-analyzer.txt`, `silent-failure-hunter.txt`,

@@ -51,6 +51,25 @@ order_ok() {
 check "blocks in canonical order"         'order_ok'
 check "unknown role fails non-zero"       '! bash "$BUILD" --packet "$PACKET" --out "$R2" --roles nope 2>/dev/null'
 
+echo "== build-prompts.sh --scoped =="
+# Fail closed FIRST, while there is no delta.patch — a scoped round that reviews
+# a missing/empty delta would report clean without checking the fix.
+RSE="$WORK/r-scoped-empty"; mkdir -p "$RSE"
+check "scoped fails with no delta.patch"   '! bash "$BUILD" --packet "$PACKET" --out "$RSE" --roles code-reviewer --scoped 2>/dev/null'
+: > "$PACKET/delta.patch"   # zero-byte delta — must also fail closed (regression guard for -s vs -f)
+check "scoped fails with empty delta.patch" '! bash "$BUILD" --packet "$PACKET" --out "$RSE" --roles code-reviewer --scoped 2>/dev/null'
+rm -f "$PACKET/delta.patch"
+# Now provide a delta and verify the scoped addendum assembles correctly.
+printf 'diff --git a/x b/x\n+real change\n' > "$PACKET/delta.patch"
+RS="$WORK/r-scoped"; mkdir -p "$RS"
+bash "$BUILD" --packet "$PACKET" --out "$RS" --roles code-reviewer,test-analyzer --scoped >/dev/null
+check "scoped succeeds with a delta.patch" '[ -f "$RS/prompt-code-reviewer.txt" ]'
+check "scoped addendum present"           'grep -q "SCOPED VERIFY ROUND" "$RS/prompt-code-reviewer.txt"'
+check "scoped points at delta.patch"      'grep -q "delta.patch" "$RS/prompt-code-reviewer.txt"'
+check "scoped addendum precedes persona"  '[ "$(grep -n "SCOPED VERIFY ROUND" "$RS/prompt-code-reviewer.txt" | head -1 | cut -d: -f1)" -lt "$(grep -n "expert code reviewer" "$RS/prompt-code-reviewer.txt" | head -1 | cut -d: -f1)" ]'
+check "non-scoped omits the addendum"     '! grep -q "SCOPED VERIFY ROUND" "$R/prompt-code-reviewer.txt"'
+rm -f "$PACKET/delta.patch"
+
 echo "== persona content (review-quality fields) =="
 RC="$WORK/r-content"; mkdir -p "$RC"
 bash "$BUILD" --packet "$PACKET" --out "$RC" \
@@ -95,6 +114,24 @@ check "no .failed on success"             '[ ! -f "$RD/.failed" ]'
 RDx="$WORK/run-core"; mkdir -p "$RDx"; mkprompts "$RDx" "${ALL[@]}"
 PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDx" --repo "$WORK" --skip silent-failure-hunter >/dev/null 2>&1
 check "refuses to skip a core agent (non-zero)" '[ "$?" -ne 0 ]'
+
+# --only: scoped verify runs EXACTLY the named roles, bypassing core-tier enforcement
+RDo="$WORK/run-only"; mkdir -p "$RDo"; mkprompts "$RDo" "${ALL[@]}"
+PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer,test-analyzer >/dev/null 2>&1
+check "--only runs exactly the named roles"   '[ -f "$RDo/review-code-reviewer.txt" ] && [ -f "$RDo/review-test-analyzer.txt" ]'
+check "--only omits unnamed core agents"      '[ ! -f "$RDo/review-silent-failure-hunter.txt" ] && [ ! -f "$RDo/review-type-design-analyzer.txt" ]'
+check "--only rejects an unknown role"        '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only nope 2>/dev/null'
+check "--only rejects combining with --add"   '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer --add comment-analyzer 2>/dev/null'
+check "--only rejects an empty value"         '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only "" 2>/dev/null'
+# Malformed comma patterns must be rejected BEFORE any agent launches, and
+# deterministically (bash read -a drops a trailing empty field on some builds).
+for bad in "code-reviewer," ",code-reviewer" "code-reviewer,,test-analyzer"; do
+  RDbad="$WORK/run-only-bad"; rm -rf "$RDbad"; mkdir -p "$RDbad"; mkprompts "$RDbad" "${ALL[@]}"
+  err="$(PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDbad" --repo "$WORK" --only "$bad" 2>&1)"; rc=$?
+  check "--only rejects '$bad' (non-zero)"       '[ "'"$rc"'" -ne 0 ]'
+  check "--only rejects '$bad' (empty-role diag)" 'printf "%s" "'"$err"'" | grep -q "empty role"'
+  check "--only rejects '$bad' (no agents ran)"   '! ls "$RDbad"/review-*.txt >/dev/null 2>&1'
+done
 
 echo "== agent-failure detection =="
 cat > "$BIN/codex" <<'FAKE'

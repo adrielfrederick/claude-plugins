@@ -164,3 +164,13 @@ Add focus bullets (no new agents):
 - Scoped verify rounds CAN exit CLEAN (Codex verifies; self-certification rule intact). If this ever produces a wrong CLEAN, tighten to "scoped round must be followed by one cheap full batch" — the escalation hook makes that a one-line change.
 - `agent-prompts.md` is demoted to documentation; `prompts/` fragments become the single source of truth (two sources would re-create drift).
 - In-flight guard uses a PR comment (visible, debuggable) rather than a hidden lock file or GitHub deployment — consistent with the loop's existing PR-comment surface.
+
+---
+
+## As-built: scoped verify rounds (shipped 0.6.0, PR after PR 1–3)
+
+Split out of PR 2 into its own PR (control-flow change; higher risk). Operator resolved the two forks:
+- **Trigger:** tests/docs-only fixes only. A round qualifies for a scoped verify iff the prior full round had 0 CRITICAL **and** this round's fix touched only tests or docs/comments (`LAST_FIX_CLASS` ∈ {tests, docs}). Any `prod` change — a type alias, a one-line guard — always gets a full batch. Rationale: a tests/docs-only delta can't introduce a production regression, so 2-agent delta verification is sufficient and can certify CLEAN safely.
+- **Exit:** a scoped round may exit CLEAN (Codex independently reviewed the delta — not self-certification). Any finding escalates the next round to a full batch; a scoped round never chains into another scoped round.
+
+**Mechanics:** `code-reviewer` + the fix's domain persona (`test-analyzer` / `comment-analyzer`) review `$PACKET/delta.patch` (`git diff LAST_FIX_BASE_SHA...HEAD`). `build-prompts.sh --scoped` prepends `_scoped.txt` (delta-focus, report-only-if-the-fix-is-wrong); `launch-agents.sh --only <roles>` runs exactly those two, the one sanctioned bypass of core-tier enforcement. State: Phase 1 Step 0 records `ROUND_BASE_SHA` and consumes `SCOPED_NEXT`→`SCOPED_THIS`; Phase 3 Step 7 classifies the fix; Phase 4 sets `SCOPED_NEXT`. Covered by 8 new selftest assertions (`--only` ×4, `--scoped` ×4).

@@ -200,11 +200,21 @@ Set up this round's directory and refresh the diff (Claude pushed fixups last ro
 ```bash
 ROUND_DIR="$RUN_DIR/round-$ITERATION"   # ITERATION starts at 0; incremented in Phase 4
 mkdir -p "$ROUND_DIR"
+ROUND_BASE_SHA="$(git rev-parse HEAD)"   # HEAD *before* this round's fixes — used to compute the delta for a later scoped verify
 # Re-run the refresh_packet_diff routine from Phase 0.5 so diff.patch / diff-wide.patch /
 # files/ / changed-files.txt / manifest.txt reflect the current PR head.
 ```
 
 All prompt/review/log files for this round live in `$ROUND_DIR`, never in `$RUN_DIR` directly. This is what makes Step 5's "a missing review file means *this round's* agent failed" reasoning sound — a stale file from round N−1 sits in `round-$((ITERATION-1))`, out of this round's parse path.
+
+**Is this a scoped verify round?** Consume the flag Phase 4 set for this round, and if scoped, write the delta of the fix under verification (see "Scoped verify rounds" after Phase 4 for the full mechanics):
+
+```bash
+SCOPED_THIS="${SCOPED_NEXT:-0}"; SCOPED_NEXT=0   # consume; each scoped round is decided fresh
+if [ "$SCOPED_THIS" = "1" ]; then
+  git diff "$LAST_FIX_BASE_SHA"...HEAD > "$PACKET/delta.patch"   # just the tests/docs-only fix being verified
+fi
+```
 
 ### Step 1: Build review history (skip on first iteration)
 
@@ -346,6 +356,18 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 4. **In parallel with posting/reporting**, run full validation (lint check, build/typecheck, tests). Commands come from CLAUDE.md / project config. If validation fails, fix, amend, force-push with `--force-with-lease`.
 5. **Verbose mode**: post `CLAUDE:` response comment per `verbose-mode.md`. **Quiet mode**: report locally.
 6. **Update `$HISTORY`**: append this round's round-summary + resolved items to `## Recent Rounds` (trim to last 2); append each pushback to `## All Prior Pushbacks` (grows forever).
+7. **Classify this round's change** (Phase 4 uses it to decide whether the next round can be a cheaper scoped verify). Look at the files you changed this round and set `LAST_FIX_CLASS`:
+
+   ```bash
+   CHANGED="$(git diff --name-only "$ROUND_BASE_SHA" HEAD)"
+   LAST_FIX_BASE_SHA="$ROUND_BASE_SHA"   # remember where this round's fix started, for delta.patch
+   ```
+
+   - `tests` — **every** changed file is a test file (`test/`, `spec/`, `__tests__/`, `*_test.*`, `*.test.*`, `tests/…`).
+   - `docs` — every changed file is documentation (`*.md`, `*.rst`, `*.txt`), **or** the only code changes are comments/docstrings (judge this — a `git diff` where every `+`/`-` line is a comment).
+   - `prod` — anything else (any production-logic change, however small — a type alias, a one-line guard, a rename all count as `prod`).
+
+   When in doubt, classify `prod`. Only `tests` / `docs` unlock a scoped verify; `prod` always gets a full batch next round.
 
 ## Phase 4: Loop check
 
@@ -359,6 +381,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
    **CLEAN** if any of:
    - Claude made no code changes this round AND last Codex review had 0 CRITICAL (classic clean exit).
+   - **This round was a scoped verify (`SCOPED_THIS=1`) and Codex returned no findings** — the tests/docs-only delta is verified. Codex independently reviewed the delta, so this is a real clean, not self-certification.
    - Last Codex review had 0 CRITICAL and every remaining IMPORTANT is either (a) in "All Prior Pushbacks" with Claude's rebuttal standing, or (b) Claude-declined-with-reasoning this round (**clean-on-pushback** — Claude is explicitly allowed to decline IMPORTANTs without a code change).
    - Every new IMPORTANT this round targets code Claude added THIS round to fix a prior finding (**fix-induced-only** — tail-chasing signature; another fix round just creates more surface).
    - `CONSECUTIVE_CLEAN_ROUNDS >= 3` (3 rounds without any CRITICAL is strong convergence).
@@ -366,12 +389,44 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    **NEEDS_HUMAN_REVIEW** if:
    - All issues from the previous round were pushbacks with no code changes AND reviewer is still surfacing the same disagreements (full author/reviewer standoff).
 
-   **Otherwise** (Claude made code changes, no exit condition met):
+   **Otherwise** (Claude made code changes, or a scoped round surfaced a finding — no exit condition met):
    - If the latest review had 0 CRITICAL, increment `CONSECUTIVE_CLEAN_ROUNDS`. Otherwise reset to 0.
-   - If `CONSECUTIVE_CLEAN_ROUNDS >= 2`, **raise the severity floor** for the next round (see Phase 1 Step 3 — agents get the 90%-confidence instruction).
+   - If `CONSECUTIVE_CLEAN_ROUNDS >= 2`, **raise the severity floor** for the next *full* round (see Phase 1 Step 3 — agents get the 90%-confidence instruction).
+   - **Decide the next round's type** (`SCOPED_NEXT`):
+     - If THIS round was a scoped verify that surfaced any finding → **escalate**: `SCOPED_NEXT=0`, next round is a full batch. A scoped round never chains into another scoped round on a finding.
+     - Else if the latest review had 0 CRITICAL **and** `LAST_FIX_CLASS` ∈ {`tests`, `docs`} (this round's fix touched only tests/docs) → `SCOPED_NEXT=1`, next round is a **scoped verify**.
+     - Else → `SCOPED_NEXT=0`, next round is a full batch (any `prod` fix, or a round with a CRITICAL, always gets the full tier).
    - Go back to **Phase 1**.
 
 5. If exiting → Phase 5.
+
+### Scoped verify rounds
+
+**Why:** loops historically ended with a full 4-agent round that found nothing — pure token waste. When the previous full round was clean of CRITICALs and Claude's only response was a **tests-only or docs/comments-only** fix, a full re-review is overkill: that fix can't introduce a production regression, so verifying it with 2 agents on just the delta is enough. Production changes never qualify (Phase 3 classifies them `prod`), so a scoped round can certify CLEAN without risk of missing a production bug — this is why the tests/docs-only gate matters and must stay strict.
+
+**When:** Phase 4 sets `SCOPED_NEXT=1` iff the latest review had 0 CRITICAL and `LAST_FIX_CLASS` ∈ {`tests`, `docs`}. Phase 1 Step 0 consumes it into `SCOPED_THIS` and writes `$PACKET/delta.patch` (the fix under verification).
+
+**How a scoped round differs (Phase 1 Steps 2–4):**
+- **Step 2 — agents:** `code-reviewer` plus the persona that owns the fix's domain, derived from `LAST_FIX_CLASS` — no core tier. **Use this `SCOPED_ROLES` in both Step 3 and Step 4** (don't hardcode `test-analyzer`, or a `docs` fix gets the wrong reviewer):
+  ```bash
+  case "$LAST_FIX_CLASS" in
+    tests) SCOPED_ROLES="code-reviewer,test-analyzer" ;;
+    docs)  SCOPED_ROLES="code-reviewer,comment-analyzer" ;;
+    *)     echo "not scoped-eligible: $LAST_FIX_CLASS" >&2; exit 1 ;;   # Phase 4 gates this; never reached
+  esac
+  ```
+- **Step 3 — prompts:** build with `--scoped` (appends the delta-focus addendum) and `--history` (prior pushbacks still apply); skip `--severity-floor` (the scoped addendum already says "report only if the fix itself is wrong"):
+  ```bash
+  "$BUILD_PROMPTS" --packet "$PACKET" --out "$ROUND_DIR" \
+    --roles "$SCOPED_ROLES" --history "$HISTORY" --scoped
+  ```
+- **Step 4 — launch:** `--only "$SCOPED_ROLES"` — the one sanctioned path that bypasses core-tier enforcement (a normal round must never pass `--only`):
+  ```bash
+  "$LAUNCH_AGENTS" --run-dir "$ROUND_DIR" --repo "$(git rev-parse --show-toplevel)" \
+    --sfh-effort medium --only "$SCOPED_ROLES"
+  ```
+
+**Outcome (Phase 4):** a clean scoped round → CLEAN exit; any finding → address it in Phase 3, then escalate to a full batch next round. A scoped round never chains into another scoped round.
 
 ## Phase 5: Wrap-up
 
@@ -446,6 +501,6 @@ fi
 - `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
 - `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
 - `scripts/selftest.sh` — runnable coverage for all of the above (no repo CI; run `bash scripts/selftest.sh`)
-- `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, and one persona file per agent
+- `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, `_scoped.txt` (scoped-verify addendum), and one persona file per agent
 - `agent-prompts.md` — documents the fragments and assembly order (no longer hand-assembled)
 - `verbose-mode.md` — PR-posting mechanics used only when `verbose` is passed
