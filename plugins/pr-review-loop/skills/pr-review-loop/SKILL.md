@@ -79,6 +79,59 @@ If either is missing, stop and tell the user with the install link from the erro
 
    All subsequent phases reference `$PACKET`, `$RUN_DIR`, `$HISTORY`, and the per-round `$ROUND_DIR` (defined at the top of each Phase 1 round) — never the old `/tmp/pr-review-packet` or `/tmp/pr-review-history.md` paths, and never a hand-invented run-dir pointer file (Phase 0 writes exactly one: `$PR_ROOT/current-run`).
 
+8. **Reconstruct history across environments (PR-resident history).** `$HISTORY` lives in `/tmp`, which dies on a container redeploy and is never shared between the laptop and the runner. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent:
+
+   ```bash
+   HISTORY_IO="$SKILL_DIR/scripts/history-io.sh"
+   if [ ! -f "$HISTORY" ]; then
+     # Match the exact HTML opener, not a bare mention — otherwise a human/bot
+     # comment that merely says "pr-review-loop:history" could be picked by `last`
+     # and clobber the real history. Only overwrite if extraction is non-empty.
+     # Warn (don't silently swallow) if the read fails — losing prior pushbacks
+     # silently is exactly the non-convergence this feature exists to prevent.
+     # The selector (history-io.sh history-filter, tested by selftest.sh) requires
+     # the opener at a LINE START, so a comment that only quotes the token in
+     # prose can't be selected by `last` over an older comment holding the real
+     # block. Extraction is anchored the same way — both ends of the round-trip
+     # require a real opener, and both come from the one tested source.
+     if ! body="$(gh pr view "$PR_NUMBER" --json comments \
+       -q "$("$HISTORY_IO" history-filter)" 2>&1)"; then
+       echo "Warning: couldn't read PR comments to reconstruct review history ($body) — proceeding without prior pushback history." >&2
+       body=""
+     fi
+     if [ -n "$body" ]; then
+       extracted="$(printf '%s\n' "$body" | "$HISTORY_IO" extract)"
+       if [ -n "$extracted" ]; then
+         printf '%s\n' "$extracted" > "$HISTORY"
+         echo "Reconstructed \$HISTORY from the PR's prior wrap-up (local file was absent)."
+       fi
+     fi
+   fi
+   ```
+
+   The PR is the durable copy; the local file is just the working copy. This makes pushback history a property of the PR, not the machine that happened to run the last loop.
+
+9. **In-flight guard — check (don't race another loop).** The runner's workflow `concurrency` serializes runner runs, but nothing stops a laptop loop racing a `review`-label runner loop on the same PR — both would push fixup commits to the same branch. Here, only *check* for a live loop on another host and abort if found. `marker-blocks` exits 0 when a fresh marker from a different host holds the PR (its 75-min freshness window — just above the whole-loop `TIMEOUT_SECONDS` — treats anything older as a dead run):
+
+   ```bash
+   HOST="$(hostname)"; NOW="$(date +%s)"
+   # Don't silently treat a comment-read FAILURE as "no marker" — warn and fall
+   # back to best-effort (the guard is defense-in-depth atop the runner's
+   # workflow concurrency; a transient gh blip shouldn't hard-fail the loop, and
+   # if gh is truly down the packet build below fails loudly anyway).
+   if ! existing="$(gh pr view "$PR_NUMBER" --json comments \
+     -q '[.comments[].body | select(contains("pr-review-loop:running"))] | last // ""' 2>&1)"; then
+     echo "Warning: couldn't read PR comments to check for a concurrent loop ($existing) — proceeding without the in-flight guard. If a runner loop is also active on this PR, cancel one." >&2
+     existing=""
+   fi
+   if [ -n "$existing" ] && printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-blocks "$HOST" "$NOW"; then
+     echo "Another pr-review-loop is running on PR #$PR_NUMBER from another host. Aborting to avoid racing fixup pushes. If that run is dead, delete its 'pr-review-loop:running' comment and retry."
+     exit 1
+   fi
+   ```
+
+   **Do NOT post your own marker here.** Posting is deferred to the end of Phase 0.5 (below) — after the fail-prone setup (base-ref resolution, packet build) has succeeded — so a preflight/setup hard-exit can never leave an orphaned marker that false-blocks the next run for 75 minutes. `MARKER_CID` stays unset until then, so Phase 5's deletion is a safe no-op on any early exit.
+
 ## Phase 0.5: Build the review packet
 
 Pre-extract everything agents need into `$PACKET`. Without this, each of the 3–6 agents independently rediscovers the repo (cat diff, read CLAUDE.md, dump source files), which dominated token cost in prior runs.
@@ -130,6 +183,13 @@ git diff --stat "$BASE_BRANCH"...HEAD > "$PACKET/changed-files.txt"
 ```
 
 The packet is the agent interface. The assembled agent prompts (see `agent-prompts.md`, built by `build-prompts.sh`) tell agents to read from here — including `manifest.txt` for exact filenames — and forbid whole-file dumps.
+
+**Post the in-flight marker now** (deferred from Phase 0 Step 9 — the fail-prone setup above has succeeded, so from here every exit funnels through Phase 5, which deletes it):
+
+```bash
+MARKER_URL="$(gh pr comment "$PR_NUMBER" --body "🔒 pr-review-loop running on \`$HOST\` (auto-removed at loop end) <!-- pr-review-loop:running $HOST $NOW -->")"
+MARKER_CID="${MARKER_URL##*issuecomment-}"   # numeric id, for deletion in Phase 5
+```
 
 ## Phase 1: Codex review
 
@@ -249,18 +309,18 @@ The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent i
 
 **Run `$LAUNCH_AGENTS` as ONE foreground bash call**, with a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS` (the CI runner sets a high `BASH_DEFAULT_TIMEOUT_MS` for this). The script blocks internally — it launches the batch, then `wait`s until every codex PID has completed or been watchdog-killed, then writes `$ROUND_DIR/.done` — so the whole round stays inside one turn. **Do NOT** background the launch and then stop/yield to "wait" for it: per the Runtime note above, a non-interactive `claude --print` run is never resumed, so a backgrounded batch is orphaned and killed the instant you stop and the loop dies with no summary. (If a single call would exceed your bash tool-timeout, poll in-turn instead: start `$LAUNCH_AGENTS` `nohup`-detached, then loop short `sleep`+check bash calls until `$ROUND_DIR/.done` exists — still never yielding the turn.)
 
-**Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — exit the loop with status `CODEX_DEGRADED` and tell the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
+**Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — set status `CODEX_DEGRADED` and **go to Phase 5** (so the wrap-up posts and the in-flight marker is removed), telling the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
 
 ### Step 5: Read and parse findings
 
-First check the launcher's exit: if `launch-agents.sh` exited non-zero, `$ROUND_DIR/.failed` lists the roles that **crashed** (codex exited non-zero without producing a review — bad/deprecated flag, untrusted or missing binary, auth error). A crashed agent is **not** "no findings" — it never ran. Do not treat a crash as clean: report it, surface the agent's `log-<role>.txt` (the first ~15 lines usually name the cause), fix the environment/flags, and re-run the round. If **every** agent crashed, exit `CODEX_DEGRADED` (same as the all-watchdog-killed case).
+First check the launcher's exit: if `launch-agents.sh` exited non-zero, `$ROUND_DIR/.failed` lists the roles that **crashed** (codex exited non-zero without producing a review — bad/deprecated flag, untrusted or missing binary, auth error). A crashed agent is **not** "no findings" — it never ran. Do not treat a crash as clean: report it, surface the agent's `log-<role>.txt` (the first ~15 lines usually name the cause), fix the environment/flags, and re-run the round. If **every** agent crashed, set `CODEX_DEGRADED` and **go to Phase 5** — never a direct exit once the in-flight marker is posted, since Phase 5 is what removes it (same routing as the all-watchdog-killed case).
 
 Then read each `$ROUND_DIR/review-{ROLE}.txt` and parse structured findings, classifying by trailing sentinel:
 - ends with a `WATCHDOG_KILLED` line → the watchdog killed a stalled agent; note "no findings (watchdog-killed)" and do not retry inline.
 - ends with an `AGENT_FAILED exit=N` line → the agent crashed (also in `.failed`); handle per the paragraph above — **never** count as "no findings."
 - missing or empty with no sentinel and no `.failed` entry → treat as "no findings" (agent ran, said nothing). Because `$ROUND_DIR` is unique per round, a missing file unambiguously means *this round's* agent, not a stale prior-round file.
 
-If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: exit `CODEX_DEGRADED`.
+If **every** agent this round was watchdog-killed, follow the systemic-degradation guard in Step 4: set `CODEX_DEGRADED` and go to Phase 5 (never exit before Phase 5 once the in-flight marker is posted — Phase 5 removes it).
 
 ## Phase 2: Aggregate findings
 
@@ -341,11 +401,17 @@ CLAUDE: Automated Review Summary
 
 ## Commits
 {list of fixup SHAs with one-line descriptions}
+
+<!-- pr-review-loop:history
+{verbatim contents of $HISTORY}
+-->
 ```
+
+The trailing `pr-review-loop:history` block is **required in both modes** — it's the durable copy of "All Prior Pushbacks" + "Recent Rounds" that Phase 0 reconstructs from when a later loop runs on a fresh machine or after a container redeploy (see Phase 0 Step 8). It's an HTML comment, so it's invisible in the rendered comment. Paste `$HISTORY` verbatim between the markers; the `-->` must be on its own line so the extractor stops there.
 
 Also post inline comments on the diff for pushed-back items and remaining suggestions (reuse the inline-comment posting logic in `verbose-mode.md`, step 4, but only for these unresolved items).
 
-**Verbose mode**: post the short final summary from `verbose-mode.md`. Individual round comments already tell the story.
+**Verbose mode**: post the short final summary from `verbose-mode.md` — and append the same `pr-review-loop:history` block to it. Individual round comments already tell the story.
 
 ### Mark ready for review (CLEAN exits only)
 
@@ -359,12 +425,27 @@ fi
 
 Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop so CI doesn't run on every review-loop push, then defer the single CI run to `ready_for_review`. Marking ready here fires that end-of-cycle CI. On repos that don't use draft-first the PR isn't a draft, so this is a no-op. **Never mark ready on a non-CLEAN exit** (`NEEDS_HUMAN_REVIEW` / `TIMED_OUT` / `MAX_ITERATIONS_REACHED` / `CODEX_DEGRADED`) — an unconverged PR must stay a draft and out of CI.
 
+### Remove the in-flight marker
+
+Delete the `pr-review-loop:running` marker posted in Phase 0 Step 9 (do this on **every** exit, clean or not, so a finished run never blocks the next one):
+
+```bash
+if [ -n "${MARKER_CID:-}" ]; then
+  err="$(gh api -X DELETE "repos/$OWNER_REPO/issues/comments/$MARKER_CID" 2>&1)" \
+    || echo "Warning: failed to delete the in-flight marker comment $MARKER_CID ($err). Delete it manually so it doesn't block the next run for ~75 min." >&2
+fi
+```
+
+(`$OWNER_REPO` is the `nameWithOwner` from Phase 0 Step 3. If the marker was never posted — e.g. an early preflight exit — `MARKER_CID` is unset and this is a no-op.)
+
 **Both modes**: report the final status and PR URL to the user.
 
 ## Bundled files
 
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
-- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier (Phase 1 Step 4)
+- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
+- `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
+- `scripts/selftest.sh` — runnable coverage for all of the above (no repo CI; run `bash scripts/selftest.sh`)
 - `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, and one persona file per agent
 - `agent-prompts.md` — documents the fragments and assembly order (no longer hand-assembled)
 - `verbose-mode.md` — PR-posting mechanics used only when `verbose` is passed

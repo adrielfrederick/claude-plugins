@@ -163,6 +163,59 @@ check "no per-role sandbox under bypass"           '! grep -q -- "-s read-only" 
 : > "$SANDBOX_TRACE"
 PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDsb" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
 check "no bypass when var unset"                   '! grep -q -- "--dangerously-bypass" "$SANDBOX_TRACE"'
+check "write agents use -s workspace-write"        'grep -q -- "-s workspace-write" "$SANDBOX_TRACE"'
+check "no deprecated --full-auto flag"             '! grep -q -- "--full-auto" "$SANDBOX_TRACE"'
+
+echo "== history-io.sh (PR-resident history / in-flight markers) =="
+HIO="$DIR/history-io.sh"
+{
+  printf '%s\n' "CLAUDE: Automated Review Summary" "## Commits" "- abc123 did a thing" ""
+  printf '%s\n' "<!-- pr-review-loop:history"
+  printf '%s\n' "## All Prior Pushbacks" "- R1 foo.py:10 — CODEX said X; CLAUDE declined." ""
+  printf '%s\n' "## Recent Rounds (last 2)" "### Round 1" "CODEX: 0 CRITICAL." "-->"
+} > "$WORK/comment-body.txt"
+bash "$HIO" extract < "$WORK/comment-body.txt" > "$WORK/hist-out.txt"
+check "extract keeps All Prior Pushbacks" 'grep -q "All Prior Pushbacks" "$WORK/hist-out.txt"'
+check "extract keeps Recent Rounds"       'grep -q "### Round 1" "$WORK/hist-out.txt"'
+check "extract drops wrap-up prose"       '! grep -q "Automated Review Summary" "$WORK/hist-out.txt"'
+check "extract drops opening marker"      '! grep -q "pr-review-loop:history" "$WORK/hist-out.txt"'
+check "extract drops closing marker"      '! grep -qx -- "-->" "$WORK/hist-out.txt"'
+# A wrap-up that QUOTES the opener token in prose (before the real block) must
+# not fool the extractor — only the line-start opener counts. (Caught in dogfood.)
+{
+  printf '%s\n' "CLAUDE: Automated Review Summary" \
+    "- fix: match the \`<!-- pr-review-loop:history\` opener exactly" ""
+  printf '%s\n' "<!-- pr-review-loop:history" "REAL-HISTORY-CONTENT" "-->"
+} > "$WORK/comment-prose.txt"
+bash "$HIO" extract < "$WORK/comment-prose.txt" > "$WORK/hist-prose.txt"
+check "extract ignores prose mention of opener" 'grep -qx "REAL-HISTORY-CONTENT" "$WORK/hist-prose.txt"'
+check "extract drops the prose bullet"          '! grep -q "fix: match" "$WORK/hist-prose.txt"'
+MARKER='🔒 pr-review-loop running on `runnerbox` (auto-removed at loop end) <!-- pr-review-loop:running runnerbox 1783400000 -->'
+check "marker-host parses host"           '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-host)" = "runnerbox" ]'
+check "marker-epoch parses epoch"         '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-epoch)" = "1783400000" ]'
+# marker-blocks decision: exit 0 = block (another active host), exit 1 = proceed
+NOW=1783400300   # 300s after the marker epoch → fresh
+check "fresh other-host marker blocks"    'printf "%s" "$MARKER" | bash "$HIO" marker-blocks laptop  '"$NOW"''
+check "own-host marker proceeds"          '! printf "%s" "$MARKER" | bash "$HIO" marker-blocks runnerbox '"$NOW"''
+check "stale other-host marker proceeds"  '! printf "%s" "$MARKER" | MARKER_MAX_AGE=60 bash "$HIO" marker-blocks laptop '"$NOW"''
+check "malformed marker proceeds"         '! printf "garbage no marker" | bash "$HIO" marker-blocks laptop '"$NOW"''
+check "empty marker proceeds"             '! printf "" | bash "$HIO" marker-blocks laptop '"$NOW"''
+# The history-selection jq predicate (used by SKILL.md via `gh -q`) is the same
+# string selftest runs through `jq` — so selector + extractor are covered end to
+# end and can't drift. A NEWER prose-only comment must NOT win over an older real
+# block. Skips only if jq is unavailable.
+if command -v jq >/dev/null 2>&1; then
+  FILTER="$(bash "$HIO" history-filter)"
+  printf '%s' '{"comments":[
+    {"body":"CLAUDE: summary\n\n<!-- pr-review-loop:history\nREAL-BLOCK-CONTENT\n-->"},
+    {"body":"a human says: fixed by matching the <!-- pr-review-loop:history opener"}
+  ]}' > "$WORK/comments.json"
+  jq -r "$FILTER" < "$WORK/comments.json" | bash "$HIO" extract > "$WORK/recon.txt"
+  check "selector+extract: older real block wins over newer prose" 'grep -qx "REAL-BLOCK-CONTENT" "$WORK/recon.txt"'
+  check "selector+extract: reconstruction is non-empty"            '[ -s "$WORK/recon.txt" ]'
+else
+  echo "  (skip: jq not installed — history-selector test needs jq)"
+fi
 
 echo
 echo "passed=$PASS failed=$FAIL"
