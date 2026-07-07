@@ -180,6 +180,16 @@ check "extract keeps Recent Rounds"       'grep -q "### Round 1" "$WORK/hist-out
 check "extract drops wrap-up prose"       '! grep -q "Automated Review Summary" "$WORK/hist-out.txt"'
 check "extract drops opening marker"      '! grep -q "pr-review-loop:history" "$WORK/hist-out.txt"'
 check "extract drops closing marker"      '! grep -qx -- "-->" "$WORK/hist-out.txt"'
+# A wrap-up that QUOTES the opener token in prose (before the real block) must
+# not fool the extractor — only the line-start opener counts. (Caught in dogfood.)
+{
+  printf '%s\n' "CLAUDE: Automated Review Summary" \
+    "- fix: match the \`<!-- pr-review-loop:history\` opener exactly" ""
+  printf '%s\n' "<!-- pr-review-loop:history" "REAL-HISTORY-CONTENT" "-->"
+} > "$WORK/comment-prose.txt"
+bash "$HIO" extract < "$WORK/comment-prose.txt" > "$WORK/hist-prose.txt"
+check "extract ignores prose mention of opener" 'grep -qx "REAL-HISTORY-CONTENT" "$WORK/hist-prose.txt"'
+check "extract drops the prose bullet"          '! grep -q "fix: match" "$WORK/hist-prose.txt"'
 MARKER='🔒 pr-review-loop running on `runnerbox` (auto-removed at loop end) <!-- pr-review-loop:running runnerbox 1783400000 -->'
 check "marker-host parses host"           '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-host)" = "runnerbox" ]'
 check "marker-epoch parses epoch"         '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-epoch)" = "1783400000" ]'

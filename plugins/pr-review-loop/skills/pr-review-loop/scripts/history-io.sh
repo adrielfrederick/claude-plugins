@@ -24,10 +24,12 @@ parse_epoch() { sed -n 's/.*pr-review-loop:running [^ ]* \([0-9][0-9]*\).*/\1/p'
 
 case "${1:-}" in
   extract)
-    # Print lines strictly between the opening `<!-- pr-review-loop:history`
-    # line and the closing `-->` line (both excluded). Visible wrap-up text
-    # before the block, and anything after the close, is dropped.
-    awk '/pr-review-loop:history/{f=1;next} /^-->/{f=0;next} f'
+    # Print lines strictly between the opening marker line and the closing
+    # `-->` line (both excluded). The opener is anchored to line START so a
+    # wrap-up comment that *quotes* the token in prose (e.g. a finding that
+    # says "match the `<!-- pr-review-loop:history` opener") can't trigger
+    # extraction early — only the real standalone opener line does.
+    awk '/^<!-- pr-review-loop:history/{f=1;next} /^-->/{f=0;next} f'
     ;;
   marker-host)  parse_host ;;
   marker-epoch) parse_epoch ;;
