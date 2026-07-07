@@ -4,6 +4,7 @@ Everything you need is in {PACKET_PATH}/:
 - files/<path>.patch      — per-file diff (slashes replaced with __)
 - manifest.txt            — exact list of the files/*.patch filenames (read this to get the names right; do NOT guess or `find` them)
 - changed-files.txt       — git diff --stat
+- delta.patch             — (scoped verify rounds only) the diff of the fix under verification; absent on normal rounds
 - CLAUDE.md, AGENTS.md    — project guidelines, review-relevant sections only (use these copies; do not re-read from repo root)
 - failure-patterns.md     — (optional) project-local failure-pattern definitions; consumed by the `failure-pattern-analyst` persona only.
 
@@ -26,5 +27,5 @@ Definitions (apply strictly):
 Before reporting each finding, ask:
 1. Would a senior reviewer block merge on this alone? If no → not CRITICAL, not IMPORTANT.
 2. Is this a variant of something in "All Prior Pushbacks" (when history is present)? If yes → skip unless you have a stronger counter-argument.
-3. Is this in code Claude added THIS round to fix a prior finding? If yes, be extra-strict — fix-induced findings drive loop non-convergence. Report only if the fix genuinely introduced a new bug, not if you noticed an edge case it could have covered.
+3. Is this in code Claude added since the previous review to fix a prior finding? If yes, be extra-strict — fix-induced findings drive loop non-convergence. Report only if the fix genuinely introduced a new bug, not if you noticed an edge case it could have covered.
 4. Is this obvious enough that another agent is likely flagging it this round? Skip unless your angle is distinct.

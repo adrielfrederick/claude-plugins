@@ -13,8 +13,11 @@
 # build-prompts.sh). Each agent writes:
 #   <run-dir>/review-<role>.txt   — codex -o output (the findings)
 #   <run-dir>/log-<role>.txt      — full stdout/stderr transcript
-# A watchdog-killed agent gets a `WATCHDOG_KILLED` sentinel appended to its
-# review file. On completion, <run-dir>/.done is written.
+# A watchdog kill is recorded OUT-OF-BAND in <run-dir>/.watchdog-killed-<role>
+# (what the reap loop classifies on — review content is model-controlled, so
+# text alone must not be able to spoof the classification) and a human-readable
+# `WATCHDOG_KILLED` sentinel is appended to the review file for Step 5's
+# reader. On completion, <run-dir>/.done is written.
 #
 # Usage:
 #   launch-agents.sh --run-dir <dir> --repo <path> \
@@ -55,6 +58,11 @@ done
 [ -n "$REPO" ]    || die "--repo is required"
 [ -d "$RUN_DIR" ] || die "run dir not found: $RUN_DIR"
 case "$SFH_EFFORT" in high|medium) ;; *) die "--sfh-effort must be high or medium" ;; esac
+# A non-numeric timeout would kill the watchdog subshell on arithmetic
+# expansion and let the agent run unbounded, with the error invisible.
+case "$AGENT_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) die "AGENT_TIMEOUT_SECONDS must be a positive integer (got '$AGENT_TIMEOUT_SECONDS')" ;;
+esac
 
 # Per-role config: "sandbox|model-flag|effort". silent-failure-hunter's effort
 # is overridden from --sfh-effort below.
@@ -93,6 +101,9 @@ if [ "$ONLY_SET" = "1" ]; then
   for r in "${ROLES[@]}"; do
     [ -n "$r" ] || die "--only contains an empty role (a stray comma?) — refusing a malformed scoped batch"
     role_config "$r" >/dev/null || die "--only: unknown role '$r'"
+    for c in "${CLEANED[@]:-}"; do
+      [ "$c" = "$r" ] && die "--only lists '$r' twice — duplicate agents would clobber each other's review/log files"
+    done
     CLEANED+=("$r")
   done
   [ "${#CLEANED[@]}" -gt 0 ] || die "--only given but no valid roles"
@@ -176,11 +187,29 @@ launch() {
     local deadline=$(( $(date +%s) + AGENT_TIMEOUT_SECONDS ))
     while kill -0 "$apid" 2>/dev/null; do
       if [ "$(date +%s)" -ge "$deadline" ]; then
-        # Write the sentinel BEFORE killing: the reap loop unblocks the instant
+        # Record the kill BEFORE killing: the reap loop unblocks the instant
         # the agent dies, so an after-kill write would race and be missed,
         # causing a watchdog kill to be misclassified as an AGENT_FAILED crash.
+        # The marker FILE is what the reap loop classifies on; the review-file
+        # sentinel is only for Step 5's human/Claude reader (review content is
+        # model-controlled and must not be able to spoof classification).
+        : > "$RUN_DIR/.watchdog-killed-$role"
         printf '\nWATCHDOG_KILLED after %ss\n' "$AGENT_TIMEOUT_SECONDS" >> "$RUN_DIR/review-$role.txt"
-        kill -TERM "$apid" 2>/dev/null; sleep 5; kill -KILL "$apid" 2>/dev/null
+        # Kill codex's direct children too — the stall often lives in a spawned
+        # helper, which a parent-only TERM would leave running past the
+        # deadline. Snapshot child PIDs BEFORE killing the parent (they reparent
+        # on its death and pkill -P would then miss them), and kill the parent
+        # first so it dies from the signal, not from observing its child exit
+        # (an exit-0 there would read as a successful completion). Grandchildren
+        # are not chased — best-effort.
+        cpids="$(pgrep -P "$apid" 2>/dev/null || true)"
+        kill -TERM "$apid" 2>/dev/null
+        # shellcheck disable=SC2086  # cpids is a space-separated PID list
+        [ -n "$cpids" ] && kill -TERM $cpids 2>/dev/null
+        sleep 5
+        kill -KILL "$apid" 2>/dev/null
+        # shellcheck disable=SC2086
+        [ -n "$cpids" ] && kill -KILL $cpids 2>/dev/null
         break
       fi
       sleep 15
@@ -200,13 +229,25 @@ done
 # non-zero and leaves an EMPTY review file. Without this check, Step 5 reads
 # that empty file as "no findings" and the round can exit CLEAN with an agent
 # that never actually ran — a false-clean. Distinguish three outcomes:
-#   exit 0                          → agent ran to completion
-#   non-zero + WATCHDOG_KILLED line → expected watchdog kill of a stalled agent
-#   non-zero, no sentinel           → crash → append AGENT_FAILED, fail the batch
+#   exit 0                            → agent ran to completion
+#   non-zero + .watchdog-killed-<role> → expected watchdog kill of a stalled agent
+#   non-zero, no marker file           → crash → append AGENT_FAILED, fail the batch
+# Classification keys on the watchdog's OUT-OF-BAND marker file, never on
+# review content — a review that happens to contain "WATCHDOG_KILLED" text is
+# model output, not a kill record.
 FAILED=()
 for entry in "${AGENT_PIDS[@]}"; do
   role="${entry%%:*}"; pid="${entry##*:}"
   if wait "$pid"; then
+    # Exit 0 = the agent completed. If the watchdog ALSO fired (it lost the
+    # race — the agent finished inside the same poll tick), its marker and
+    # sentinel are spurious: drop both so a successful review isn't read
+    # downstream as a partial, watchdog-killed one.
+    if [ -f "$RUN_DIR/.watchdog-killed-$role" ]; then
+      rm -f "$RUN_DIR/.watchdog-killed-$role"
+      grep -v '^WATCHDOG_KILLED' "$RUN_DIR/review-$role.txt" > "$RUN_DIR/review-$role.txt.tmp" || true
+      mv "$RUN_DIR/review-$role.txt.tmp" "$RUN_DIR/review-$role.txt"
+    fi
     # Exit 0 but an empty review file is anomalous — every persona is told to
     # write at least "No issues found." A codex output-write failure or a CLI
     # behavior change would otherwise be read as a clean "no findings" round.
@@ -217,8 +258,8 @@ for entry in "${AGENT_PIDS[@]}"; do
     fi
   else
     st=$?
-    if grep -q '^WATCHDOG_KILLED' "$RUN_DIR/review-$role.txt" 2>/dev/null; then
-      :
+    if [ -f "$RUN_DIR/.watchdog-killed-$role" ]; then
+      :   # expected watchdog kill of a stalled agent (marker kept for debugging)
     else
       printf '\nAGENT_FAILED exit=%s\n' "$st" >> "$RUN_DIR/review-$role.txt"
       echo "AGENT FAILED: $role exited $st without producing a review — see log-$role.txt" >&2

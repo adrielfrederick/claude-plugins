@@ -108,7 +108,13 @@ gh pr comment $PR_NUMBER --body "CLAUDE: Review Loop Complete
 - Duration: {minutes}m
 
 ## Status
-{CLEAN | NEEDS_HUMAN_REVIEW | TIMED_OUT | MAX_ITERATIONS_REACHED}
+{CLEAN | NEEDS_HUMAN_REVIEW | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
 
-Unresolved IMPORTANT pushbacks do not block CLEAN — see individual round comments for reasoning."
+Unresolved IMPORTANT pushbacks do not block CLEAN — see individual round comments for reasoning.
+
+<!-- pr-review-loop:history
+{verbatim contents of \$HISTORY}
+-->"
 ```
+
+The trailing `pr-review-loop:history` block is **required** (same rule as the quiet-mode wrap-up, SKILL.md Phase 5) — it is the durable copy Phase 0 reconstructs pushback history from on a fresh machine. Paste `$HISTORY` verbatim; the `-->` must be on its own line.

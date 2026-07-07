@@ -28,16 +28,21 @@ case "${1:-}" in
     # `-->` line (both excluded). The opener is anchored to line START so a
     # wrap-up comment that *quotes* the token in prose (e.g. a finding that
     # says "match the `<!-- pr-review-loop:history` opener") can't trigger
-    # extraction early — only the real standalone opener line does.
-    awk '/^<!-- pr-review-loop:history/{f=1;next} /^-->/{f=0;next} f'
+    # extraction early — only the real standalone opener line does. The closer
+    # must be EXACTLY `-->` on its own line (the writer guarantees that, see
+    # SKILL.md Phase 5) — a history line that merely *starts* with `-->` (quoted
+    # code, HTML) must not silently truncate everything after it.
+    awk '/^<!-- pr-review-loop:history/{f=1;next} /^-->[[:space:]]*$/{f=0;next} f'
     ;;
   history-filter)
     # The jq/gh-`-q` predicate that selects the newest PR comment holding a REAL
     # history block. Single source of truth: SKILL.md Phase 0 passes this to
     # `gh ... -q`, and selftest.sh runs it through `jq` — so the two can't drift.
-    # `\n<!-- ...` requires the opener at a line start, so a prose-only mention
-    # is never selected over an older comment with the real block.
-    printf '%s' '[.comments[].body | select(contains("\n<!-- pr-review-loop:history"))] | last // ""'
+    # Line-start = preceded by \n OR the very start of the body (a comment that
+    # BEGINS with the block has no leading \n and must still be selected);
+    # a prose-only mention mid-line is never selected over an older real block.
+    # Relies on gh returning comments in ascending creation order (`last` = newest).
+    printf '%s' '[.comments[].body | select(startswith("<!-- pr-review-loop:history") or contains("\n<!-- pr-review-loop:history"))] | last // ""'
     ;;
   marker-host)  parse_host ;;
   marker-epoch) parse_epoch ;;

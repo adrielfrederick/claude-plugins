@@ -35,8 +35,11 @@ Personas (one file per agent, the filename is the role name):
    only; backend already shipped in #469 — do not flag missing backend logic").
    It rides under a fixed header so the canonical blocks stay byte-exact. Claude
    MAY write `$RUN_DIR/context.txt`; everything else is fixed.
-4. **`<role>.txt` persona** — always.
-5. **`_severity-floor.txt`** — only when `--severity-floor` is passed.
+4. **`_scoped.txt`** — only when `--scoped` is passed (scoped verify rounds);
+   sits directly before the persona so the delta-focus instruction is the last
+   framing the persona reads under.
+5. **`<role>.txt` persona** — always.
+6. **`_severity-floor.txt`** — only when `--severity-floor` is passed.
 
 ## Changing a prompt
 

@@ -12,7 +12,7 @@ Confidence threshold: report only findings at 80+.
 Output per issue:
 - File: relative path
 - Line: line number in the new version
-- Severity: CRITICAL (90-100) | IMPORTANT (80-89)
+- Severity: CRITICAL (confidence 90-100) | IMPORTANT (confidence 80-89) — confidence gates *whether* you report; the shared definitions in the packet preamble govern *what each severity means* (would a senior reviewer block merge?)
 - Description: what's wrong and why
 - Failure scenario: concrete inputs/state → the wrong output or crash. If you cannot name a concrete one, this is not CRITICAL/IMPORTANT — downgrade to SUGGESTION or omit.
 - Fix: concrete suggestion

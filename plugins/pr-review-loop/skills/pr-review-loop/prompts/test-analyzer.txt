@@ -12,7 +12,7 @@ Confidence threshold: 7+ on a 1–10 scale (10 = could cause data loss/security 
 Output per gap:
 - File: path to the file that needs testing (not the test file)
 - Line: approximate line number of untested code
-- Severity: CRITICAL (9-10) | IMPORTANT (7-8)
+- Severity: CRITICAL (9-10) | IMPORTANT (7-8) — the scale gates *whether* you report; the shared definitions in the packet preamble govern *what each severity means* (would a senior reviewer block merge on this gap?)
 - Description: what's not tested
 - Failure scenario: the concrete regression this gap would let through — inputs/state → wrong behavior that ships undetected. If you can't name a specific regression, the gap isn't worth a round; omit it.
 - Fix: specific test to add

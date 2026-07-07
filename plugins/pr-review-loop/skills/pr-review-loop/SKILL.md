@@ -40,14 +40,17 @@ Step 4). This is also correct interactively — it just matters most here.
 
 ```bash
 command -v codex >/dev/null 2>&1 || { echo "Error: Codex CLI not found on PATH. This skill uses the Codex CLI to run reviewer agents. Install: https://developers.openai.com/codex/cli"; exit 1; }
+codex --version  >/dev/null 2>&1 || { echo "Error: codex is on PATH but won't run — likely a broken install (missing vendored binary, or macOS Gatekeeper/cert rejection). Run 'codex --version' to see the failure; reinstalling the npm package usually fixes it."; exit 1; }
 command -v gh    >/dev/null 2>&1 || { echo "Error: gh (GitHub CLI) not found on PATH. Install: https://cli.github.com/"; exit 1; }
 ```
+
+(`command -v` alone is not enough: a broken vendored binary passes it and then every agent dies mid-round — observed live when a codex release's signing cert was revoked.)
 
 If either is missing, stop and tell the user with the install link from the error message — do not proceed to the numbered steps below.
 
 1. `git rev-parse --show-toplevel` to confirm we're in a git repo.
 2. `gh pr view --json number,baseRefName,headRefName,url` — if no PR, stop and tell the user.
-3. Extract: `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`, `PR_URL`, `OWNER/REPO` (`gh repo view --json nameWithOwner -q .nameWithOwner`).
+3. Extract: `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`, `PR_URL`, `OWNER_REPO` (`gh repo view --json nameWithOwner -q .nameWithOwner`).
 4. `START_TIME=$(date +%s)`, `ITERATION=0`, `CONSECUTIVE_CLEAN_ROUNDS=0`.
 5. Safety nets: `MAX_ITERATIONS=10`, `TIMEOUT_SECONDS=3600` (whole-loop, across rounds), `AGENT_TIMEOUT_SECONDS=900` (per-agent wall-clock watchdog — see Phase 1 Step 4). These are caps, NOT budgets — do not reduce thoroughness to fit within them. Note `TIMEOUT_SECONDS` is evaluated only *between* rounds (Phase 4) and so cannot interrupt a round that is currently hung; `AGENT_TIMEOUT_SECONDS` is the guard that actually bounds a single round's wall time.
 6. **Locate the bundled scripts.** This skill ships its helper scripts and prompt fragments next to this SKILL.md, under `scripts/` and `prompts/`. Set `SKILL_DIR` to **this skill's base directory** — the absolute path printed as "Base directory for this skill" when the skill loads (equivalently, the directory this SKILL.md lives in). Anchoring on the base dir works for **both** install layouts: standalone (`~/.claude/skills/pr-review-loop`) and plugin (`.../plugins/pr-review-loop/skills/pr-review-loop`).
@@ -64,11 +67,16 @@ If either is missing, stop and tell the user with the install link from the erro
 
    ```bash
    mkdir -p /tmp/pr-review
-   # Opportunistic GC: drop run dirs older than 7 days across all PRs.
-   # Depth 3 = /tmp/pr-review/<PR>/runs/<RUN_ID>. history.md sits at depth 2 and is preserved.
-   find /tmp/pr-review -mindepth 3 -maxdepth 3 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+   # Opportunistic GC: drop run dirs older than 7 days across all repos/PRs.
+   # Depth 4 = /tmp/pr-review/<owner__repo>/<PR>/runs/<RUN_ID>. history.md sits at depth 3 and is preserved.
+   find /tmp/pr-review -mindepth 4 -maxdepth 4 -type d -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+   # Legacy pre-0.7.0 layout (/tmp/pr-review/<PR>/ with no repo slug): GC whole PR dirs.
+   find /tmp/pr-review -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
-   PR_ROOT=/tmp/pr-review/$PR_NUMBER
+   # Namespace by repo, not just PR number: a long-lived runner container hosts
+   # several repos on ONE /tmp, so two repos' PR #12 must never share state — a
+   # shared history.md would feed one repo's pushbacks into the other's review.
+   PR_ROOT="/tmp/pr-review/${OWNER_REPO//\//__}/$PR_NUMBER"
    RUN_ID="$(date +%s)-$$"
    RUN_DIR=$PR_ROOT/runs/$RUN_ID
    PACKET=$RUN_DIR/packet
@@ -78,6 +86,8 @@ If either is missing, stop and tell the user with the install link from the erro
    ```
 
    All subsequent phases reference `$PACKET`, `$RUN_DIR`, `$HISTORY`, and the per-round `$ROUND_DIR` (defined at the top of each Phase 1 round) — never the old `/tmp/pr-review-packet` or `/tmp/pr-review-history.md` paths, and never a hand-invented run-dir pointer file (Phase 0 writes exactly one: `$PR_ROOT/current-run`).
+
+   **Cross-call state — variables do NOT survive between bash calls.** Every bash snippet below runs in a fresh shell. Loop state (`ITERATION`, `START_TIME`, `CONSECUTIVE_CLEAN_ROUNDS`, `SEVERITY_FLOOR_ACTIVE`, `SCOPED_NEXT`, `SCOPED_THIS`, `LAST_FIX_CLASS`, `LAST_FIX_BASE_SHA`, `ROUND_BASE_SHA`, `MARKER_CID`, paths like `$RUN_DIR`) lives in **your conversation**, not the shell — when you run a snippet, set every variable it reads at the top of that same bash call (re-inline the literal values you're tracking). Never paste a snippet whose variables you haven't defined in that call: an empty `$LAST_FIX_BASE_SHA` makes the scoped delta silently wrong, and an empty `$MARKER_CID` makes the marker deletion a silent no-op. The two values that must survive even a fresh conversation are persisted to disk: `$PR_ROOT/current-run` (this run's dir) and `$PR_ROOT/marker-cid` (written in Phase 0.5, read by Phase 5).
 
 8. **Reconstruct history across environments (PR-resident history).** `$HISTORY` lives in `/tmp`, which dies on a container redeploy and is never shared between the laptop and the runner. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent:
 
@@ -130,26 +140,13 @@ If either is missing, stop and tell the user with the install link from the erro
    fi
    ```
 
+   A marker from the **same** host deliberately does not block: it's treated as a dead prior run on this machine (a crashed local loop must not lock you out for 75 minutes). Corollary: the guard does not protect two loops started concurrently on the *same* machine — never start a second loop on a PR this host is already reviewing.
+
    **Do NOT post your own marker here.** Posting is deferred to the end of Phase 0.5 (below) — after the fail-prone setup (base-ref resolution, packet build) has succeeded — so a preflight/setup hard-exit can never leave an orphaned marker that false-blocks the next run for 75 minutes. `MARKER_CID` stays unset until then, so Phase 5's deletion is a safe no-op on any early exit.
 
 ## Phase 0.5: Build the review packet
 
 Pre-extract everything agents need into `$PACKET`. Without this, each of the 3–6 agents independently rediscovers the repo (cat diff, read CLAUDE.md, dump source files), which dominated token cost in prior runs.
-
-**Resolve the base ref first.** `$BASE_BRANCH` is a bare name (e.g. `main`) from `gh pr view`. On the laptop a local `main` usually exists, but in a CI/runner checkout (the vault-bot `pr-runner`) only the PR head is checked out — bare `main` doesn't resolve, and neither may `origin/main`, so every `git diff "$BASE_BRANCH"...HEAD` errors. Resolve once, up front, fetching if needed, and hard-fail rather than silently producing an empty packet:
-
-```bash
-if git rev-parse -q --verify "refs/heads/$BASE_BRANCH" >/dev/null 2>&1; then
-  :                                             # local branch (laptop)
-elif git rev-parse -q --verify "refs/remotes/origin/$BASE_BRANCH" >/dev/null 2>&1; then
-  BASE_BRANCH="origin/$BASE_BRANCH"             # remote-tracking ref present
-else
-  # head-only checkout (runner): fetch the base so a merge-base exists for the 3-dot diff.
-  git fetch --no-tags origin "$BASE_BRANCH" 2>/dev/null \
-    && BASE_BRANCH=FETCH_HEAD \
-    || { echo "Error: cannot resolve base ref '$BASE_BRANCH' — no local/remote ref and fetch failed."; exit 1; }
-fi
-```
 
 **One-time static copies** — only the review-relevant sections of the guideline docs, not the whole file. The full CLAUDE.md is often 10–12KB of deployment/planning/comms prose that every agent re-reads; a diff review needs only commands, testing, conventions, and style limits.
 
@@ -163,24 +160,17 @@ fi
 
 After copying `$PACKET/CLAUDE.md`, read it and remove sections a code reviewer doesn't need (deployment, scheduling, planning/execution contracts, communication-style rules), keeping Project/Environment/Commands/Testing/Conventions/style limits. If a section's relevance is ambiguous, keep it — the goal is dropping obvious bulk, not aggressive pruning.
 
-**Diff artifacts — a routine you re-run every round.** Claude pushes fixup commits between rounds, so the diff changes; regenerate these at the start of each round (Phase 1 Step 0), not just once:
+**Diff artifacts — a script you re-run every round.** Claude pushes fixup commits between rounds, so the diff changes; `refresh-packet.sh` regenerates `diff.patch`, the per-file `files/` splits, `manifest.txt`, `diff-wide.patch`, and `changed-files.txt`, and owns **base-ref resolution** (on a laptop the bare base branch exists locally; in a CI/runner head-only checkout it must resolve `origin/<base>` or fetch — it hard-fails rather than silently producing an empty packet). Call it here, and again at the top of every round (Phase 1 Step 0) — never hand-generate these artifacts:
 
 ```bash
-# refresh_packet_diff: safe to re-run; overwrites the diff artifacts in place.
-gh pr diff $PR_NUMBER > "$PACKET/diff.patch"
-
-rm -rf "$PACKET/files"; mkdir -p "$PACKET/files"
-# Per-file split — eliminates output-truncation re-read loops
-gh pr diff $PR_NUMBER | awk '
-  /^diff --git / { if (out) close(out); split($0, a, " "); f=a[4]; sub(/^b\//,"",f); gsub(/\//,"__",f); out="'"$PACKET"'/files/" f ".patch" }
-  out { print > out }
-'
-# manifest.txt: exact per-file patch names, so agents read the right files instead of guessing paths or running `find` (the PR 470 token sink).
-ls "$PACKET/files" > "$PACKET/manifest.txt"
-
-git diff "$BASE_BRANCH"...HEAD -U30 > "$PACKET/diff-wide.patch"
-git diff --stat "$BASE_BRANCH"...HEAD > "$PACKET/changed-files.txt"
+"$SKILL_DIR/scripts/refresh-packet.sh" \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --packet "$PACKET" \
+  --pr "$PR_NUMBER" \
+  --base "$BASE_BRANCH"     # the bare name from gh pr view; the script resolves it fresh each call
 ```
+
+If it exits non-zero, stop and surface its error — do not improvise the artifacts by hand (hand-generated packets are the drift class the scripts exist to kill).
 
 The packet is the agent interface. The assembled agent prompts (see `agent-prompts.md`, built by `build-prompts.sh`) tell agents to read from here — including `manifest.txt` for exact filenames — and forbid whole-file dumps.
 
@@ -189,7 +179,10 @@ The packet is the agent interface. The assembled agent prompts (see `agent-promp
 ```bash
 MARKER_URL="$(gh pr comment "$PR_NUMBER" --body "🔒 pr-review-loop running on \`$HOST\` (auto-removed at loop end) <!-- pr-review-loop:running $HOST $NOW -->")"
 MARKER_CID="${MARKER_URL##*issuecomment-}"   # numeric id, for deletion in Phase 5
+printf '%s\n' "$MARKER_CID" > "$PR_ROOT/marker-cid"   # persist: Phase 5 runs in a fresh shell
 ```
+
+**From this moment, every exit routes through Phase 5** — not just the enumerated statuses, but *any* fatal error in Phases 1–4: a failed `refresh-packet.sh` or `build-prompts.sh`, an unfixable agent-crash environment, a rejected push, a gh outage. If you must stop for any reason, first run Phase 5's marker-removal step (post the wrap-up too if there's anything to report). Never end the turn with the marker still posted — an orphaned marker false-blocks every other host for 75 minutes.
 
 ## Phase 1: Codex review
 
@@ -201,8 +194,13 @@ Set up this round's directory and refresh the diff (Claude pushed fixups last ro
 ROUND_DIR="$RUN_DIR/round-$ITERATION"   # ITERATION starts at 0; incremented in Phase 4
 mkdir -p "$ROUND_DIR"
 ROUND_BASE_SHA="$(git rev-parse HEAD)"   # HEAD *before* this round's fixes — used to compute the delta for a later scoped verify
-# Re-run the refresh_packet_diff routine from Phase 0.5 so diff.patch / diff-wide.patch /
-# files/ / changed-files.txt / manifest.txt reflect the current PR head.
+# Refresh the packet so diff.patch / files/ / manifest.txt / diff-wide.patch /
+# changed-files.txt reflect the current PR head (Claude pushed fixups last round).
+"$SKILL_DIR/scripts/refresh-packet.sh" \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --packet "$PACKET" \
+  --pr "$PR_NUMBER" \
+  --base "$BASE_BRANCH"
 ```
 
 All prompt/review/log files for this round live in `$ROUND_DIR`, never in `$RUN_DIR` directly. This is what makes Step 5's "a missing review file means *this round's* agent failed" reasoning sound — a stale file from round N−1 sits in `round-$((ITERATION-1))`, out of this round's parse path.
@@ -323,7 +321,7 @@ The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent i
 
 ### Step 5: Read and parse findings
 
-First check the launcher's exit: if `launch-agents.sh` exited non-zero, `$ROUND_DIR/.failed` lists the roles that **crashed** (codex exited non-zero without producing a review — bad/deprecated flag, untrusted or missing binary, auth error). A crashed agent is **not** "no findings" — it never ran. Do not treat a crash as clean: report it, surface the agent's `log-<role>.txt` (the first ~15 lines usually name the cause), fix the environment/flags, and re-run the round. If **every** agent crashed, set `CODEX_DEGRADED` and **go to Phase 5** — never a direct exit once the in-flight marker is posted, since Phase 5 is what removes it (same routing as the all-watchdog-killed case).
+First check the launcher's exit: if `launch-agents.sh` exited non-zero, `$ROUND_DIR/.failed` lists the roles that **crashed** (codex exited non-zero without producing a review — bad/deprecated flag, untrusted or missing binary, auth error). A crashed agent is **not** "no findings" — it never ran. Do not treat a crash as clean: report it, surface the agent's `log-<role>.txt` (the first ~15 lines usually name the cause), fix the environment/flags, and re-run the round. If the environment **can't** be fixed (broken codex install, revoked auth), set `CODEX_DEGRADED` and go to Phase 5 — don't stop mid-loop with the marker posted. If **every** agent crashed, set `CODEX_DEGRADED` and **go to Phase 5** — never a direct exit once the in-flight marker is posted, since Phase 5 is what removes it (same routing as the all-watchdog-killed case).
 
 Then read each `$ROUND_DIR/review-{ROLE}.txt` and parse structured findings, classifying by trailing sentinel:
 - ends with a `WATCHDOG_KILLED` line → the watchdog killed a stalled agent; note "no findings (watchdog-killed)" and do not retry inline.
@@ -367,7 +365,9 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - `docs` — every changed file is documentation (`*.md`, `*.rst`, `*.txt`), **or** the only code changes are comments/docstrings (judge this — a `git diff` where every `+`/`-` line is a comment).
    - `prod` — anything else (any production-logic change, however small — a type alias, a one-line guard, a rename all count as `prod`).
 
-   When in doubt, classify `prod`. Only `tests` / `docs` unlock a scoped verify; `prod` always gets a full batch next round.
+   When in doubt, classify `prod`. Only `tests` / `docs` unlock a scoped verify; `prod` always gets a full batch next round. If you changed nothing this round (`CHANGED` is empty — all pushbacks), classify `prod`: an empty change set must not vacuously count as "all tests".
+
+   **Classify the final pushed state.** If you amend/force-push *after* this step (e.g. a late validation fix from step 4), re-run this classification — a `docs` round whose validation fix touched prod code must become `prod`, or Phase 4 would wrongly unlock a scoped verify for a production change.
 
 ## Phase 4: Loop check
 
@@ -383,14 +383,15 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - Claude made no code changes this round AND last Codex review had 0 CRITICAL (classic clean exit).
    - **This round was a scoped verify (`SCOPED_THIS=1`) and Codex returned no findings** — the tests/docs-only delta is verified. Codex independently reviewed the delta, so this is a real clean, not self-certification.
    - Last Codex review had 0 CRITICAL and every remaining IMPORTANT is either (a) in "All Prior Pushbacks" with Claude's rebuttal standing, or (b) Claude-declined-with-reasoning this round (**clean-on-pushback** — Claude is explicitly allowed to decline IMPORTANTs without a code change).
-   - Every new IMPORTANT this round targets code Claude added THIS round to fix a prior finding (**fix-induced-only** — tail-chasing signature; another fix round just creates more surface).
    - `CONSECUTIVE_CLEAN_ROUNDS >= 3` (3 rounds without any CRITICAL is strong convergence).
+
+   **Fix-induced findings get no special exit** (changed in 0.7.0 — the old "fix-induced-only ⇒ CLEAN" bullet let just-pushed, never-reviewed fixes ship). When this round's findings only target code added since the *previous* review to fix prior findings (the tail-chasing signature), handle them like any other finding in Phase 3: fix, or decline with evidence. Declining them all with no code change routes through **clean-on-pushback** above — a legitimate CLEAN, the findings were answered. Fixing any of them routes through **Otherwise** below, and the normal `LAST_FIX_CLASS` gate decides whether the verification round is scoped (tests/docs fix) or full (prod fix). Either way, Codex reviews the final pushed state — never exit CLEAN with fixes no reviewer has seen.
 
    **NEEDS_HUMAN_REVIEW** if:
    - All issues from the previous round were pushbacks with no code changes AND reviewer is still surfacing the same disagreements (full author/reviewer standoff).
 
    **Otherwise** (Claude made code changes, or a scoped round surfaced a finding — no exit condition met):
-   - If the latest review had 0 CRITICAL, increment `CONSECUTIVE_CLEAN_ROUNDS`. Otherwise reset to 0.
+   - **Clean-round credit (full rounds only):** if this round was a full batch and its review had 0 CRITICAL, increment `CONSECUTIVE_CLEAN_ROUNDS`; a CRITICAL from *any* round (full or scoped) resets it to 0. A scoped round with only IMPORTANT/SUGGESTION findings leaves the counter unchanged — a 2-agent delta review is not full-batch evidence and must not earn severity-floor credit.
    - If `CONSECUTIVE_CLEAN_ROUNDS >= 2`, **raise the severity floor** for the next *full* round (see Phase 1 Step 3 — agents get the 90%-confidence instruction).
    - **Decide the next round's type** (`SCOPED_NEXT`):
      - If THIS round was a scoped verify that surfaced any finding → **escalate**: `SCOPED_NEXT=0`, next round is a full batch. A scoped round never chains into another scoped round on a finding.
@@ -482,21 +483,27 @@ Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop 
 
 ### Remove the in-flight marker
 
-Delete the `pr-review-loop:running` marker posted in Phase 0 Step 9 (do this on **every** exit, clean or not, so a finished run never blocks the next one):
+Delete the `pr-review-loop:running` marker posted at the end of Phase 0.5 (do this on **every** exit, clean or not, so a finished run never blocks the next one):
 
 ```bash
+# Fresh-shell safe: fall back to the persisted copy from Phase 0.5.
+MARKER_CID="${MARKER_CID:-$(cat "$PR_ROOT/marker-cid" 2>/dev/null || true)}"
 if [ -n "${MARKER_CID:-}" ]; then
-  err="$(gh api -X DELETE "repos/$OWNER_REPO/issues/comments/$MARKER_CID" 2>&1)" \
-    || echo "Warning: failed to delete the in-flight marker comment $MARKER_CID ($err). Delete it manually so it doesn't block the next run for ~75 min." >&2
+  if err="$(gh api -X DELETE "repos/$OWNER_REPO/issues/comments/$MARKER_CID" 2>&1)"; then
+    rm -f "$PR_ROOT/marker-cid"
+  else
+    echo "Warning: failed to delete the in-flight marker comment $MARKER_CID ($err). Delete it manually so it doesn't block the next run for ~75 min." >&2
+  fi
 fi
 ```
 
-(`$OWNER_REPO` is the `nameWithOwner` from Phase 0 Step 3. If the marker was never posted — e.g. an early preflight exit — `MARKER_CID` is unset and this is a no-op.)
+(`$OWNER_REPO` is the `nameWithOwner` from Phase 0 Step 3. If the marker was never posted — e.g. an early preflight exit — `MARKER_CID` is unset, `$PR_ROOT/marker-cid` doesn't exist, and this is a no-op.)
 
 **Both modes**: report the final status and PR URL to the user.
 
 ## Bundled files
 
+- `scripts/refresh-packet.sh` — resolves the base ref and (re)generates the packet's diff artifacts (Phase 0.5, Phase 1 Step 0)
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
 - `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
 - `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
