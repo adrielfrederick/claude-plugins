@@ -82,6 +82,12 @@ CORE=(code-reviewer test-analyzer silent-failure-hunter type-design-analyzer)
 if [ "$ONLY_SET" = "1" ]; then
   [ -n "$ONLY" ] || die "--only was given an empty role list"
   [ "${#ADDONS[@]}" -eq 0 ] && [ "${#SKIP[@]}" -eq 0 ] || die "--only cannot be combined with --add/--skip"
+  # Reject malformed comma patterns on the RAW string, deterministically — bash
+  # `read -a` drops a trailing empty field on some builds, so a trailing comma
+  # ("code-reviewer,") could otherwise slip through and silently run one agent.
+  case "$ONLY" in
+    ,*|*,|*,,*) die "--only has an empty role (leading/trailing/double comma): '$ONLY'" ;;
+  esac
   IFS=',' read -r -a ROLES <<< "$ONLY"
   CLEANED=()
   for r in "${ROLES[@]}"; do

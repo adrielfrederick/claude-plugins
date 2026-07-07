@@ -55,7 +55,10 @@ echo "== build-prompts.sh --scoped =="
 # Fail closed FIRST, while there is no delta.patch — a scoped round that reviews
 # a missing/empty delta would report clean without checking the fix.
 RSE="$WORK/r-scoped-empty"; mkdir -p "$RSE"
-check "scoped fails with no delta.patch"  '! bash "$BUILD" --packet "$PACKET" --out "$RSE" --roles code-reviewer --scoped 2>/dev/null'
+check "scoped fails with no delta.patch"   '! bash "$BUILD" --packet "$PACKET" --out "$RSE" --roles code-reviewer --scoped 2>/dev/null'
+: > "$PACKET/delta.patch"   # zero-byte delta — must also fail closed (regression guard for -s vs -f)
+check "scoped fails with empty delta.patch" '! bash "$BUILD" --packet "$PACKET" --out "$RSE" --roles code-reviewer --scoped 2>/dev/null'
+rm -f "$PACKET/delta.patch"
 # Now provide a delta and verify the scoped addendum assembles correctly.
 printf 'diff --git a/x b/x\n+real change\n' > "$PACKET/delta.patch"
 RS="$WORK/r-scoped"; mkdir -p "$RS"
@@ -120,7 +123,15 @@ check "--only omits unnamed core agents"      '[ ! -f "$RDo/review-silent-failur
 check "--only rejects an unknown role"        '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only nope 2>/dev/null'
 check "--only rejects combining with --add"   '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer --add comment-analyzer 2>/dev/null'
 check "--only rejects an empty value"         '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only "" 2>/dev/null'
-check "--only rejects a stray-comma entry"    '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only "code-reviewer," 2>/dev/null'
+# Malformed comma patterns must be rejected BEFORE any agent launches, and
+# deterministically (bash read -a drops a trailing empty field on some builds).
+for bad in "code-reviewer," ",code-reviewer" "code-reviewer,,test-analyzer"; do
+  RDbad="$WORK/run-only-bad"; rm -rf "$RDbad"; mkdir -p "$RDbad"; mkprompts "$RDbad" "${ALL[@]}"
+  err="$(PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDbad" --repo "$WORK" --only "$bad" 2>&1)"; rc=$?
+  check "--only rejects '$bad' (non-zero)"       '[ "'"$rc"'" -ne 0 ]'
+  check "--only rejects '$bad' (empty-role diag)" 'printf "%s" "'"$err"'" | grep -q "empty role"'
+  check "--only rejects '$bad' (no agents ran)"   '! ls "$RDbad"/review-*.txt >/dev/null 2>&1'
+done
 
 echo "== agent-failure detection =="
 cat > "$BIN/codex" <<'FAKE'
