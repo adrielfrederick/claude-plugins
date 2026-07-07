@@ -87,8 +87,13 @@ If either is missing, stop and tell the user with the install link from the erro
      # Match the exact HTML opener, not a bare mention — otherwise a human/bot
      # comment that merely says "pr-review-loop:history" could be picked by `last`
      # and clobber the real history. Only overwrite if extraction is non-empty.
-     body="$(gh pr view "$PR_NUMBER" --json comments \
-       -q '[.comments[].body | select(contains("<!-- pr-review-loop:history"))] | last // ""' 2>/dev/null)"
+     # Warn (don't silently swallow) if the read fails — losing prior pushbacks
+     # silently is exactly the non-convergence this feature exists to prevent.
+     if ! body="$(gh pr view "$PR_NUMBER" --json comments \
+       -q '[.comments[].body | select(contains("<!-- pr-review-loop:history"))] | last // ""' 2>&1)"; then
+       echo "Warning: couldn't read PR comments to reconstruct review history ($body) — proceeding without prior pushback history." >&2
+       body=""
+     fi
      if [ -n "$body" ]; then
        extracted="$(printf '%s\n' "$body" | "$HISTORY_IO" extract)"
        if [ -n "$extracted" ]; then
