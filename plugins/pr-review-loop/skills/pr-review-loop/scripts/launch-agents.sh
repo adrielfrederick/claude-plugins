@@ -57,8 +57,8 @@ case "$SFH_EFFORT" in high|medium) ;; *) die "--sfh-effort must be high or mediu
 # is overridden from --sfh-effort below.
 role_config() {
   case "$1" in
-    code-reviewer)           echo "--full-auto||medium" ;;
-    test-analyzer)           echo "--full-auto||medium" ;;
+    code-reviewer)           echo "-s workspace-write||medium" ;;
+    test-analyzer)           echo "-s workspace-write||medium" ;;
     silent-failure-hunter)   echo "-s read-only||$SFH_EFFORT" ;;
     type-design-analyzer)    echo "-s read-only|-m gpt-5.4-mini|medium" ;;
     comment-analyzer)        echo "-s read-only|-m gpt-5.4-mini|low" ;;

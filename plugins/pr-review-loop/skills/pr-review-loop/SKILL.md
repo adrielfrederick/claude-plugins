@@ -79,6 +79,42 @@ If either is missing, stop and tell the user with the install link from the erro
 
    All subsequent phases reference `$PACKET`, `$RUN_DIR`, `$HISTORY`, and the per-round `$ROUND_DIR` (defined at the top of each Phase 1 round) — never the old `/tmp/pr-review-packet` or `/tmp/pr-review-history.md` paths, and never a hand-invented run-dir pointer file (Phase 0 writes exactly one: `$PR_ROOT/current-run`).
 
+8. **Reconstruct history across environments (PR-resident history).** `$HISTORY` lives in `/tmp`, which dies on a container redeploy and is never shared between the laptop and the runner. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent:
+
+   ```bash
+   HISTORY_IO="$SKILL_DIR/scripts/history-io.sh"
+   if [ ! -f "$HISTORY" ]; then
+     body="$(gh pr view "$PR_NUMBER" --json comments \
+       -q '[.comments[].body | select(contains("pr-review-loop:history"))] | last // ""' 2>/dev/null)"
+     if [ -n "$body" ]; then
+       printf '%s\n' "$body" | "$HISTORY_IO" extract > "$HISTORY"
+       echo "Reconstructed \$HISTORY from the PR's prior wrap-up (local file was absent)."
+     fi
+   fi
+   ```
+
+   The PR is the durable copy; the local file is just the working copy. This makes pushback history a property of the PR, not the machine that happened to run the last loop.
+
+9. **In-flight guard (don't race another loop).** The runner's workflow `concurrency` serializes runner runs, but nothing stops a laptop loop racing a `review`-label runner loop on the same PR — both would push fixup commits to the same branch. Before starting, check for a fresh marker from a *different* host, then post your own:
+
+   ```bash
+   HOST="$(hostname)"; NOW="$(date +%s)"
+   existing="$(gh pr view "$PR_NUMBER" --json comments \
+     -q '[.comments[].body | select(contains("pr-review-loop:running"))] | last // ""' 2>/dev/null)"
+   if [ -n "$existing" ]; then
+     mhost="$(printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-host)"
+     mtime="$(printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-epoch)"
+     if [ -n "$mtime" ] && [ "$mhost" != "$HOST" ] && [ "$(( NOW - mtime ))" -lt 4500 ]; then
+       echo "Another pr-review-loop is running on PR #$PR_NUMBER from '$mhost' ($(( (NOW - mtime) / 60 ))m ago). Aborting to avoid racing fixup pushes. If that run is dead, delete its 'pr-review-loop:running' comment and retry."
+       exit 1
+     fi
+   fi
+   MARKER_URL="$(gh pr comment "$PR_NUMBER" --body "🔒 pr-review-loop running on \`$HOST\` (auto-removed at loop end) <!-- pr-review-loop:running $HOST $NOW -->")"
+   MARKER_CID="${MARKER_URL##*issuecomment-}"   # numeric id, for deletion in Phase 5
+   ```
+
+   The 4500s (75 min) window is just above the whole-loop `TIMEOUT_SECONDS`, so a marker older than that is treated as a dead run, not a live one. Phase 5 deletes this marker.
+
 ## Phase 0.5: Build the review packet
 
 Pre-extract everything agents need into `$PACKET`. Without this, each of the 3–6 agents independently rediscovers the repo (cat diff, read CLAUDE.md, dump source files), which dominated token cost in prior runs.
@@ -341,11 +377,17 @@ CLAUDE: Automated Review Summary
 
 ## Commits
 {list of fixup SHAs with one-line descriptions}
+
+<!-- pr-review-loop:history
+{verbatim contents of $HISTORY}
+-->
 ```
+
+The trailing `pr-review-loop:history` block is **required in both modes** — it's the durable copy of "All Prior Pushbacks" + "Recent Rounds" that Phase 0 reconstructs from when a later loop runs on a fresh machine or after a container redeploy (see Phase 0 Step 8). It's an HTML comment, so it's invisible in the rendered comment. Paste `$HISTORY` verbatim between the markers; the `-->` must be on its own line so the extractor stops there.
 
 Also post inline comments on the diff for pushed-back items and remaining suggestions (reuse the inline-comment posting logic in `verbose-mode.md`, step 4, but only for these unresolved items).
 
-**Verbose mode**: post the short final summary from `verbose-mode.md`. Individual round comments already tell the story.
+**Verbose mode**: post the short final summary from `verbose-mode.md` — and append the same `pr-review-loop:history` block to it. Individual round comments already tell the story.
 
 ### Mark ready for review (CLEAN exits only)
 
@@ -359,12 +401,24 @@ fi
 
 Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop so CI doesn't run on every review-loop push, then defer the single CI run to `ready_for_review`. Marking ready here fires that end-of-cycle CI. On repos that don't use draft-first the PR isn't a draft, so this is a no-op. **Never mark ready on a non-CLEAN exit** (`NEEDS_HUMAN_REVIEW` / `TIMED_OUT` / `MAX_ITERATIONS_REACHED` / `CODEX_DEGRADED`) — an unconverged PR must stay a draft and out of CI.
 
+### Remove the in-flight marker
+
+Delete the `pr-review-loop:running` marker posted in Phase 0 Step 9 (do this on **every** exit, clean or not, so a finished run never blocks the next one):
+
+```bash
+[ -n "${MARKER_CID:-}" ] && gh api -X DELETE "repos/$OWNER_REPO/issues/comments/$MARKER_CID" 2>/dev/null || true
+```
+
+(`$OWNER_REPO` is the `nameWithOwner` from Phase 0 Step 3. If the marker was never posted — e.g. an early preflight exit — `MARKER_CID` is unset and this is a no-op.)
+
 **Both modes**: report the final status and PR URL to the user.
 
 ## Bundled files
 
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
-- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier (Phase 1 Step 4)
+- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
+- `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
+- `scripts/selftest.sh` — runnable coverage for all of the above (no repo CI; run `bash scripts/selftest.sh`)
 - `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, and one persona file per agent
 - `agent-prompts.md` — documents the fragments and assembly order (no longer hand-assembled)
 - `verbose-mode.md` — PR-posting mechanics used only when `verbose` is passed

@@ -163,6 +163,26 @@ check "no per-role sandbox under bypass"           '! grep -q -- "-s read-only" 
 : > "$SANDBOX_TRACE"
 PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDsb" --repo "$WORK" --skip failure-pattern-analyst >/dev/null 2>&1
 check "no bypass when var unset"                   '! grep -q -- "--dangerously-bypass" "$SANDBOX_TRACE"'
+check "write agents use -s workspace-write"        'grep -q -- "-s workspace-write" "$SANDBOX_TRACE"'
+check "no deprecated --full-auto flag"             '! grep -q -- "--full-auto" "$SANDBOX_TRACE"'
+
+echo "== history-io.sh (PR-resident history / in-flight markers) =="
+HIO="$DIR/history-io.sh"
+{
+  printf '%s\n' "CLAUDE: Automated Review Summary" "## Commits" "- abc123 did a thing" ""
+  printf '%s\n' "<!-- pr-review-loop:history"
+  printf '%s\n' "## All Prior Pushbacks" "- R1 foo.py:10 — CODEX said X; CLAUDE declined." ""
+  printf '%s\n' "## Recent Rounds (last 2)" "### Round 1" "CODEX: 0 CRITICAL." "-->"
+} > "$WORK/comment-body.txt"
+bash "$HIO" extract < "$WORK/comment-body.txt" > "$WORK/hist-out.txt"
+check "extract keeps All Prior Pushbacks" 'grep -q "All Prior Pushbacks" "$WORK/hist-out.txt"'
+check "extract keeps Recent Rounds"       'grep -q "### Round 1" "$WORK/hist-out.txt"'
+check "extract drops wrap-up prose"       '! grep -q "Automated Review Summary" "$WORK/hist-out.txt"'
+check "extract drops opening marker"      '! grep -q "pr-review-loop:history" "$WORK/hist-out.txt"'
+check "extract drops closing marker"      '! grep -qx -- "-->" "$WORK/hist-out.txt"'
+MARKER='🔒 pr-review-loop running on `runnerbox` (auto-removed at loop end) <!-- pr-review-loop:running runnerbox 1783400000 -->'
+check "marker-host parses host"           '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-host)" = "runnerbox" ]'
+check "marker-epoch parses epoch"         '[ "$(printf "%s" "$MARKER" | bash "$HIO" marker-epoch)" = "1783400000" ]'
 
 echo
 echo "passed=$PASS failed=$FAIL"
