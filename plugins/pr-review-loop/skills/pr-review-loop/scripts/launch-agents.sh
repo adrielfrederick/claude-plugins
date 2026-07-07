@@ -215,7 +215,12 @@ launch() {
       sleep 15
     done
   ) &
-  AGENT_PIDS+=("$role:$apid")
+  local wpid=$!
+  # Track BOTH pids: the reap loop joins the watchdog (wpid) before reading its
+  # marker, so a watchdog that fires in the same tick the agent exits can't
+  # write the marker AFTER the classification check (a TOCTOU that would leave a
+  # spurious kill record on a completed review, dropping its findings).
+  AGENT_PIDS+=("$role:$apid:$wpid")
   echo "launched $role (sandbox='$sandbox' model='${model:-default}' effort='$effort') pid=$apid"
 }
 
@@ -237,8 +242,14 @@ done
 # model output, not a kill record.
 FAILED=()
 for entry in "${AGENT_PIDS[@]}"; do
-  role="${entry%%:*}"; pid="${entry##*:}"
-  if wait "$pid"; then
+  role="${entry%%:*}"; rest="${entry#*:}"; pid="${rest%%:*}"; wpid="${rest##*:}"
+  agent_rc=0; wait "$pid" || agent_rc=$?
+  # Join the watchdog BEFORE inspecting its marker, so the marker file is in its
+  # final state (written-or-never) at classification time. The watchdog exits on
+  # its own within one poll tick of the agent's death; this bounds the batch's
+  # reap overhead to ~one tick, paid once (all watchdogs wind down in parallel).
+  wait "$wpid" 2>/dev/null || true
+  if [ "$agent_rc" -eq 0 ]; then
     # Exit 0 = the agent completed. If the watchdog ALSO fired (it lost the
     # race — the agent finished inside the same poll tick), its marker and
     # sentinel are spurious: drop both so a successful review isn't read
@@ -257,12 +268,11 @@ for entry in "${AGENT_PIDS[@]}"; do
       FAILED+=("$role")
     fi
   else
-    st=$?
     if [ -f "$RUN_DIR/.watchdog-killed-$role" ]; then
       :   # expected watchdog kill of a stalled agent (marker kept for debugging)
     else
-      printf '\nAGENT_FAILED exit=%s\n' "$st" >> "$RUN_DIR/review-$role.txt"
-      echo "AGENT FAILED: $role exited $st without producing a review — see log-$role.txt" >&2
+      printf '\nAGENT_FAILED exit=%s\n' "$agent_rc" >> "$RUN_DIR/review-$role.txt"
+      echo "AGENT FAILED: $role exited $agent_rc without producing a review — see log-$role.txt" >&2
       FAILED+=("$role")
     fi
   fi

@@ -359,6 +359,26 @@ git -C "$FR" update-ref refs/remotes/origin/main "$BASESHA"
 git -C "$FR" branch -qD main
 out="$(PATH="$BIN:$PATH" FAKE_BASE=origin/main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main)"
 check "refresh: falls back to origin/<base>" 'printf "%s" "$out" | grep -q "base=origin/main"'
+# Runner case #2 (the head-only checkout the fallback exists for): no local
+# main AND no remote-tracking origin/main, but an origin remote HAS main, so an
+# explicit `git fetch origin main` resolves it to FETCH_HEAD. Separate fixture
+# with a real bare origin so the fetch actually succeeds.
+REMOTE="$WORK/remote.git"; git init -q --bare "$REMOTE"
+FR2="$WORK/fixture-fetch"
+git init -q -b main "$FR2" 2>/dev/null || { git init -q "$FR2"; git -C "$FR2" checkout -qb main; }
+git -C "$FR2" config user.email t@t; git -C "$FR2" config user.name t
+printf 'base\n' > "$FR2/f.txt"; git -C "$FR2" add -A; git -C "$FR2" commit -qm base
+git -C "$FR2" remote add origin "$REMOTE"; git -C "$FR2" push -q origin main
+BASE2="$(git -C "$FR2" rev-parse main)"
+git -C "$FR2" checkout -qb feature
+printf 'change\n' >> "$FR2/f.txt"; git -C "$FR2" add -A; git -C "$FR2" commit -qm change
+git -C "$FR2" branch -qD main                                    # no local base ref
+git -C "$FR2" update-ref -d refs/remotes/origin/main 2>/dev/null || true  # no remote-tracking ref
+PK2="$WORK/packet-fetch"; mkdir -p "$PK2"
+out2="$(PATH="$BIN:$PATH" FAKE_BASE="$BASE2" bash "$REFRESH" --repo "$FR2" --packet "$PK2" --pr 1 --base main)"
+check "refresh: fetch fallback resolves FETCH_HEAD"  'printf "%s" "$out2" | grep -q "base=FETCH_HEAD"'
+check "refresh: fetch fallback writes diff-wide"     '[ -s "$PK2/diff-wide.patch" ]'
+check "refresh: fetch fallback writes changed-files" '[ -s "$PK2/changed-files.txt" ]'
 # No local ref, no remote-tracking ref, no origin remote → fetch fails → die.
 git -C "$FR" update-ref -d refs/remotes/origin/main
 check "refresh: unresolvable base dies"    '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main 2>/dev/null'
