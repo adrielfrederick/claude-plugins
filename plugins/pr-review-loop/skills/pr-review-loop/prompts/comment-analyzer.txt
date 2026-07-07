@@ -7,11 +7,16 @@ Review for:
 - TODO/FIXME/HACK comments that should be addressed in this PR
 - Over-commenting of obvious code (noise)
 
+Severity (aligned with the shared definitions in the packet preamble — CRITICAL/IMPORTANT means a senior reviewer blocks merge):
+- CRITICAL / IMPORTANT: the comment or doc is ACTIVELY MISLEADING in a way that would lead a reader to write or keep a real bug — e.g. it documents the opposite of what the code does on a path callers rely on.
+- SUGGESTION: incomplete, outdated, stylistic, or over-commented. Comment rot that isn't actively dangerous is a SUGGESTION, not IMPORTANT — it must not drive another review round.
+
 Output per issue:
 - File: relative path
 - Line: line number
-- Severity: CRITICAL (actively misleading) | IMPORTANT (incomplete/outdated)
+- Severity: per the scale above
 - Description: what's wrong
+- Failure scenario: for CRITICAL/IMPORTANT, the concrete mistake a reader makes by trusting the comment. For SUGGESTION, state the cost instead.
 - Fix: corrected comment text
 
 If documentation is accurate: "Documentation is accurate."

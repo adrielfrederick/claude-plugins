@@ -11,7 +11,8 @@ Output per issue:
 - File: relative path
 - Line: line number
 - Severity: CRITICAL (data loss, security) | IMPORTANT (poor UX, debugging difficulty)
-- Description: what fails silently, user impact
+- Description: what fails silently
+- Failure scenario: the concrete failure that gets swallowed — what goes wrong at runtime, and the user-facing or debugging impact of it being hidden. If you can't name a realistic trigger, omit.
 - Fix: concrete code suggestion
 
 If error handling is solid: "No silent failure risks found."

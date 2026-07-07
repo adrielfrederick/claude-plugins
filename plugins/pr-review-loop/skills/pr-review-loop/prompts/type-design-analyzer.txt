@@ -11,6 +11,7 @@ Output per issue:
 - Line: line number
 - Severity: CRITICAL (invariant violation possible) | IMPORTANT (weak encapsulation)
 - Description: the type-design problem
+- Failure scenario: the illegal state that becomes representable and the concrete construction or mutation path that reaches it. If no caller can actually reach the bad state, downgrade or omit.
 - Fix: improved type definition or validation
 
 If no new types are introduced or changes are minor: "No type design issues — changes are minor/no new types."
