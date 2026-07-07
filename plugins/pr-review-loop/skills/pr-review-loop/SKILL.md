@@ -84,11 +84,17 @@ If either is missing, stop and tell the user with the install link from the erro
    ```bash
    HISTORY_IO="$SKILL_DIR/scripts/history-io.sh"
    if [ ! -f "$HISTORY" ]; then
+     # Match the exact HTML opener, not a bare mention — otherwise a human/bot
+     # comment that merely says "pr-review-loop:history" could be picked by `last`
+     # and clobber the real history. Only overwrite if extraction is non-empty.
      body="$(gh pr view "$PR_NUMBER" --json comments \
-       -q '[.comments[].body | select(contains("pr-review-loop:history"))] | last // ""' 2>/dev/null)"
+       -q '[.comments[].body | select(contains("<!-- pr-review-loop:history"))] | last // ""' 2>/dev/null)"
      if [ -n "$body" ]; then
-       printf '%s\n' "$body" | "$HISTORY_IO" extract > "$HISTORY"
-       echo "Reconstructed \$HISTORY from the PR's prior wrap-up (local file was absent)."
+       extracted="$(printf '%s\n' "$body" | "$HISTORY_IO" extract)"
+       if [ -n "$extracted" ]; then
+         printf '%s\n' "$extracted" > "$HISTORY"
+         echo "Reconstructed \$HISTORY from the PR's prior wrap-up (local file was absent)."
+       fi
      fi
    fi
    ```
@@ -99,8 +105,15 @@ If either is missing, stop and tell the user with the install link from the erro
 
    ```bash
    HOST="$(hostname)"; NOW="$(date +%s)"
-   existing="$(gh pr view "$PR_NUMBER" --json comments \
-     -q '[.comments[].body | select(contains("pr-review-loop:running"))] | last // ""' 2>/dev/null)"
+   # Don't silently treat a comment-read FAILURE as "no marker" — warn and fall
+   # back to best-effort (the guard is defense-in-depth atop the runner's
+   # workflow concurrency; a transient gh blip shouldn't hard-fail the loop, and
+   # if gh is truly down the packet build below fails loudly anyway).
+   if ! existing="$(gh pr view "$PR_NUMBER" --json comments \
+     -q '[.comments[].body | select(contains("pr-review-loop:running"))] | last // ""' 2>&1)"; then
+     echo "Warning: couldn't read PR comments to check for a concurrent loop ($existing) — proceeding without the in-flight guard. If a runner loop is also active on this PR, cancel one." >&2
+     existing=""
+   fi
    if [ -n "$existing" ] && printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-blocks "$HOST" "$NOW"; then
      echo "Another pr-review-loop is running on PR #$PR_NUMBER from another host. Aborting to avoid racing fixup pushes. If that run is dead, delete its 'pr-review-loop:running' comment and retry."
      exit 1
@@ -290,7 +303,7 @@ The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent i
 
 ### Step 5: Read and parse findings
 
-First check the launcher's exit: if `launch-agents.sh` exited non-zero, `$ROUND_DIR/.failed` lists the roles that **crashed** (codex exited non-zero without producing a review — bad/deprecated flag, untrusted or missing binary, auth error). A crashed agent is **not** "no findings" — it never ran. Do not treat a crash as clean: report it, surface the agent's `log-<role>.txt` (the first ~15 lines usually name the cause), fix the environment/flags, and re-run the round. If **every** agent crashed, exit `CODEX_DEGRADED` (same as the all-watchdog-killed case).
+First check the launcher's exit: if `launch-agents.sh` exited non-zero, `$ROUND_DIR/.failed` lists the roles that **crashed** (codex exited non-zero without producing a review — bad/deprecated flag, untrusted or missing binary, auth error). A crashed agent is **not** "no findings" — it never ran. Do not treat a crash as clean: report it, surface the agent's `log-<role>.txt` (the first ~15 lines usually name the cause), fix the environment/flags, and re-run the round. If **every** agent crashed, set `CODEX_DEGRADED` and **go to Phase 5** — never a direct exit once the in-flight marker is posted, since Phase 5 is what removes it (same routing as the all-watchdog-killed case).
 
 Then read each `$ROUND_DIR/review-{ROLE}.txt` and parse structured findings, classifying by trailing sentinel:
 - ends with a `WATCHDOG_KILLED` line → the watchdog killed a stalled agent; note "no findings (watchdog-killed)" and do not retry inline.
@@ -407,7 +420,10 @@ Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop 
 Delete the `pr-review-loop:running` marker posted in Phase 0 Step 9 (do this on **every** exit, clean or not, so a finished run never blocks the next one):
 
 ```bash
-[ -n "${MARKER_CID:-}" ] && gh api -X DELETE "repos/$OWNER_REPO/issues/comments/$MARKER_CID" 2>/dev/null || true
+if [ -n "${MARKER_CID:-}" ]; then
+  err="$(gh api -X DELETE "repos/$OWNER_REPO/issues/comments/$MARKER_CID" 2>&1)" \
+    || echo "Warning: failed to delete the in-flight marker comment $MARKER_CID ($err). Delete it manually so it doesn't block the next run for ~75 min." >&2
+fi
 ```
 
 (`$OWNER_REPO` is the `nameWithOwner` from Phase 0 Step 3. If the marker was never posted — e.g. an early preflight exit — `MARKER_CID` is unset and this is a no-op.)
