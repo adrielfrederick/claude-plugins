@@ -68,17 +68,41 @@ esac
 
 # Per-role config: "sandbox|model-flag|effort". silent-failure-hunter's effort
 # is overridden from --sfh-effort below.
+#
+# The heavy review roles are pinned to gpt-5.6-sol; the low-value roles to the
+# cheaper gpt-5.6-luna (the 5.6-family mini). Before 0.8.0 the heavy roles had an
+# empty -m and tracked the ambient config default — non-deterministic across the
+# laptop and the runner, which has no config.toml. Pinning makes the review
+# models identical everywhere. Every gpt-5.6-* model needs codex >= 0.144.1
+# (enforced below).
 role_config() {
   case "$1" in
-    code-reviewer)           echo "-s workspace-write||medium" ;;
-    test-analyzer)           echo "-s workspace-write||medium" ;;
-    silent-failure-hunter)   echo "-s read-only||$SFH_EFFORT" ;;
-    type-design-analyzer)    echo "-s read-only|-m gpt-5.4-mini|medium" ;;
-    comment-analyzer)        echo "-s read-only|-m gpt-5.4-mini|low" ;;
-    code-simplifier)         echo "-s read-only|-m gpt-5.4-mini|low" ;;
-    failure-pattern-analyst) echo "-s read-only||medium" ;;
+    code-reviewer)           echo "-s workspace-write|-m gpt-5.6-sol|medium" ;;
+    test-analyzer)           echo "-s workspace-write|-m gpt-5.6-sol|medium" ;;
+    silent-failure-hunter)   echo "-s read-only|-m gpt-5.6-sol|$SFH_EFFORT" ;;
+    type-design-analyzer)    echo "-s read-only|-m gpt-5.6-luna|medium" ;;
+    comment-analyzer)        echo "-s read-only|-m gpt-5.6-luna|low" ;;
+    code-simplifier)         echo "-s read-only|-m gpt-5.6-luna|low" ;;
+    failure-pattern-analyst) echo "-s read-only|-m gpt-5.6-sol|medium" ;;
     *)                       return 1 ;;
   esac
+}
+
+# The gpt-5.6 models (sol, luna) have a hard client-version floor: the model name
+# is baked into older CLIs (it shows up in `-m` and the session header), but the
+# API rejects it with a 400 "requires a newer version of Codex" until the CLI is
+# >= 0.144.1. Guard here — colocated with the model pins, the single source of
+# truth — so a stale codex (e.g. an un-rebuilt runner image) fails fast with one
+# clear line instead of every agent 400ing mid-round and surfacing as AGENT_FAILED.
+MIN_CODEX_FOR_GPT56="0.144.1"
+require_codex_version() {
+  local min="$1" have
+  have="$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  [ -n "$have" ] || die "could not read codex version (need >= $min for the gpt-5.6 models)"
+  # have >= min  ⟺  min is the smaller (or equal) of the two under version sort.
+  if [ "$(printf '%s\n%s\n' "$min" "$have" | sort -V | head -1)" != "$min" ]; then
+    die "codex $have is too old for the gpt-5.6 models (need >= $min). Run 'codex update' on a laptop, or rebuild the pr-runner image on the server."
+  fi
 }
 
 CORE=(code-reviewer test-analyzer silent-failure-hunter type-design-analyzer)
@@ -153,6 +177,15 @@ fi   # end --only vs normal-round assembly
 for role in "${ROLES[@]}"; do
   [ -f "$RUN_DIR/prompt-$role.txt" ] || die "missing prompt: $RUN_DIR/prompt-$role.txt (run build-prompts.sh first)"
   role_config "$role" >/dev/null || die "no config for role '$role'"
+done
+
+# If any selected role uses a gpt-5.6-* model, enforce its codex floor before we
+# spawn a single agent. Matched on the family prefix (not a specific model) so it
+# covers sol + luna today and stays quiet for any future non-5.6 role.
+for role in "${ROLES[@]}"; do
+  case "$(role_config "$role")" in
+    *"-m gpt-5.6-"*) require_codex_version "$MIN_CODEX_FOR_GPT56"; break ;;
+  esac
 done
 
 launch() {
