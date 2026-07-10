@@ -46,6 +46,8 @@ command -v gh    >/dev/null 2>&1 || { echo "Error: gh (GitHub CLI) not found on 
 
 (`command -v` alone is not enough: a broken vendored binary passes it and then every agent dies mid-round — observed live when a codex release's signing cert was revoked.)
 
+**Codex version floor.** The review roles are pinned to Codex models that have a hard client-version minimum — a too-old CLI is rejected *server-side* with a 400 ("requires a newer version of Codex"), not a clean "model not found", and the model names are baked into older CLIs so they *look* available. `launch-agents.sh` enforces the floor before spawning any agent and `die`s with the required version if the CLI is too old, so you don't check it here — but if a round dies with a "too old for the … models" message, upgrade Codex (`codex update` on a laptop; **rebuild the runner image** on the server, since it bakes Codex in at build time) and re-run. The exact models + floor live in `launch-agents.sh` (single source of truth).
+
 If either is missing, stop and tell the user with the install link from the error message — do not proceed to the numbered steps below.
 
 1. `git rev-parse --show-toplevel` to confirm we're in a git repo.
