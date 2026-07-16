@@ -96,8 +96,15 @@ Pushed fixup commit: {SHORT_SHA}"
 
 ## Phase 5 Verbose — final summary
 
+Post this through `gh-io.sh post-comment` (retry + REST→GraphQL fallback), not a
+bare `gh pr comment` — it is the loop's verdict, and a single-shot post silently
+drops it when GitHub's REST API degrades. Write the body to a file and pass
+`--body-file`; see SKILL.md Phase 5, including what to do if the post fails.
+
 ```bash
-gh pr comment $PR_NUMBER --body "CLAUDE: Review Loop Complete
+cat > "$RUN_DIR/summary.md" <<'EOF'
+CLAUDE: Review Loop Complete
+<!-- pr-review-loop:summary -->
 
 ## Summary
 - Iterations: {N} ({M} Codex rounds + {N-M} Claude fix rounds)
@@ -113,8 +120,15 @@ gh pr comment $PR_NUMBER --body "CLAUDE: Review Loop Complete
 Unresolved IMPORTANT pushbacks do not block CLEAN — see individual round comments for reasoning.
 
 <!-- pr-review-loop:history
-{verbatim contents of \$HISTORY}
--->"
+{verbatim contents of $HISTORY}
+-->
+EOF
+"$SKILL_DIR/scripts/gh-io.sh" post-comment --repo "$OWNER_REPO" --pr "$PR_NUMBER" \
+  --body-file "$RUN_DIR/summary.md"
 ```
+
+(The heredoc is quoted (`<<'EOF'`), so fill the `{…}` placeholders in as you write the file rather than relying on shell expansion.)
+
+The `pr-review-loop:summary` marker on line 2 is **required** and byte-exact — `gh-io.sh reconcile` and the CI workflow use it to tell a published verdict from a loop that died quietly, and verbose runs are checked exactly like quiet ones.
 
 The trailing `pr-review-loop:history` block is **required** (same rule as the quiet-mode wrap-up, SKILL.md Phase 5) — it is the durable copy Phase 0 reconstructs pushback history from on a fresh machine. Paste `$HISTORY` verbatim; the `-->` must be on its own line.

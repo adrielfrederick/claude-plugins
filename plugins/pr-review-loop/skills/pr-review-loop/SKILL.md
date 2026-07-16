@@ -177,18 +177,24 @@ If it exits non-zero, stop and surface its error — do not improvise the artifa
 
 The packet is the agent interface. The assembled agent prompts (see `agent-prompts.md`, built by `build-prompts.sh`) tell agents to read from here — including `manifest.txt` for exact filenames — and forbid whole-file dumps.
 
-**Post the in-flight marker now** (deferred from Phase 0 Step 9 — the fail-prone setup above has succeeded, so from here every exit funnels through Phase 5, which deletes it):
+**Post the in-flight marker now** (deferred from Phase 0 Step 9 — the fail-prone setup above has succeeded, so from here every exit funnels through Phase 5, which deletes it).
+
+Post it with `gh-io.sh` — **never a bare `gh pr comment`**. Every GitHub *write* in this skill goes through that script, which retries with backoff and falls back from REST to GraphQL on each attempt. A single-shot `gh` call here is exactly what stranded two locks on reduction#10 during GitHub's 2026-07-16 degradation (REST 5xx'd; GraphQL was up the whole time). It also persists the comment's **node id** alongside the numeric id, which Phase 5's GraphQL fallback needs and which cannot be looked up later without the same REST endpoint that goes down:
 
 ```bash
+GH_IO="$SKILL_DIR/scripts/gh-io.sh"
 # Self-derive HOST/NOW — do NOT reuse Phase 0 Step 9's values: this snippet runs
 # in a fresh shell (empty expansions would post a malformed marker that silently
 # defeats the guard for other hosts), and the 75-min freshness window should
 # start at posting time anyway, not at the earlier check.
 HOST="$(hostname)"; NOW="$(date +%s)"
-MARKER_URL="$(gh pr comment "$PR_NUMBER" --body "🔒 pr-review-loop running on \`$HOST\` (auto-removed at loop end) <!-- pr-review-loop:running $HOST $NOW -->")"
-MARKER_CID="${MARKER_URL##*issuecomment-}"   # numeric id, for deletion in Phase 5
-printf '%s\n' "$MARKER_CID" > "$PR_ROOT/marker-cid"   # persist: Phase 5 runs in a fresh shell
+printf '🔒 pr-review-loop running on `%s` (auto-removed at loop end) <!-- pr-review-loop:running %s %s -->\n' \
+  "$HOST" "$HOST" "$NOW" > "$RUN_DIR/marker-body.txt"
+"$GH_IO" post-comment --repo "$OWNER_REPO" --pr "$PR_NUMBER" \
+  --body-file "$RUN_DIR/marker-body.txt" --id-file "$PR_ROOT/marker-cid"
 ```
+
+`post-comment` writes `"<databaseId> <nodeId>"` to `--id-file` as part of the same operation that posts, so there is no window where a marker exists on the PR that nothing knows the id of. Phase 5 reads that file back. If this call **fails** (both APIs down), it exits non-zero and no marker was posted — stop and tell the user GitHub is unreachable; do not proceed to review with no lock.
 
 **From this moment, every exit routes through Phase 5** — not just the enumerated statuses, but *any* fatal error in Phases 1–4: a failed `refresh-packet.sh` or `build-prompts.sh`, an unfixable agent-crash environment, a rejected push, a gh outage. If you must stop for any reason, first run Phase 5's marker-removal step (post the wrap-up too if there's anything to report). Never end the turn with the marker still posted — an orphaned marker false-blocks every other host for 75 minutes.
 
@@ -441,8 +447,19 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
 **Quiet mode**: post a single comprehensive PR comment — the full story of the loop. A human reading only this should understand everything.
 
+**Post it with `gh-io.sh post-comment`** (write the body to a file first — it is long and multi-line), never a bare `gh pr comment`:
+
+```bash
+GH_IO="$SKILL_DIR/scripts/gh-io.sh"   # re-set: fresh shell
+# ... write the summary below to "$RUN_DIR/summary.md" ...
+"$GH_IO" post-comment --repo "$OWNER_REPO" --pr "$PR_NUMBER" --body-file "$RUN_DIR/summary.md"
+```
+
+**If that call exits non-zero, the loop has failed** — the whole point of the run is the verdict, and it did not reach the PR. Do not carry on to the marker removal and report success. Say so plainly in your final message to the user, print the summary you were trying to post so the work isn't lost, and report the run's status as failed. (In CI the workflow's reconcile step independently catches this — see "CI reconciliation" below — but a laptop run has no such backstop, so the honest report is yours to make.)
+
 ```
 CLAUDE: Automated Review Summary
+<!-- pr-review-loop:summary -->
 
 ## Overview
 - Iterations: {N} rounds ({M} Codex + {N-M} Claude fix)
@@ -471,11 +488,13 @@ CLAUDE: Automated Review Summary
 -->
 ```
 
+The `pr-review-loop:summary` marker on the second line is **required in both modes** and must be byte-exact. It's how `gh-io.sh reconcile` (and the CI workflow) tells "the loop published its verdict" from "the loop died quietly" — the heading prose is not the contract, since a human comment can quote it. Keep it an HTML comment so it stays invisible in the rendered comment.
+
 The trailing `pr-review-loop:history` block is **required in both modes** — it's the durable copy of "All Prior Pushbacks" + "Recent Rounds" that Phase 0 reconstructs from when a later loop runs on a fresh machine or after a container redeploy (see Phase 0 Step 8). It's an HTML comment, so it's invisible in the rendered comment. Paste `$HISTORY` verbatim between the markers; the `-->` must be on its own line so the extractor stops there.
 
 Also post inline comments on the diff for pushed-back items and remaining suggestions (reuse the inline-comment posting logic in `verbose-mode.md`, step 4, but only for these unresolved items).
 
-**Verbose mode**: post the short final summary from `verbose-mode.md` — and append the same `pr-review-loop:history` block to it. Individual round comments already tell the story.
+**Verbose mode**: post the short final summary from `verbose-mode.md` — through `gh-io.sh post-comment`, and carrying the same `pr-review-loop:summary` marker and `pr-review-loop:history` block. Individual round comments already tell the story.
 
 ### Mark ready for review (CLEAN exits only)
 
@@ -494,20 +513,24 @@ Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop 
 Delete the `pr-review-loop:running` marker posted at the end of Phase 0.5 (do this on **every** exit, clean or not, so a finished run never blocks the next one):
 
 ```bash
-# Fresh-shell safe: fall back to the persisted copy from Phase 0.5.
-MARKER_CID="${MARKER_CID:-$(cat "$PR_ROOT/marker-cid" 2>/dev/null || true)}"
-if [ -n "${MARKER_CID:-}" ]; then
-  if err="$(gh api -X DELETE "repos/$OWNER_REPO/issues/comments/$MARKER_CID" 2>&1)"; then
-    rm -f "$PR_ROOT/marker-cid"
-  else
-    echo "Warning: failed to delete the in-flight marker comment $MARKER_CID ($err). Delete it manually so it doesn't block the next run for ~75 min." >&2
-  fi
+GH_IO="$SKILL_DIR/scripts/gh-io.sh"   # re-set: fresh shell
+# --id-file is the pair post-comment persisted in Phase 0.5 ("<databaseId>
+# <nodeId>"); gh-io reads both, deletes via REST with a GraphQL fallback, and
+# removes the file on success. If the marker was never posted (an early
+# preflight exit) the file doesn't exist and this is a no-op.
+if [ -f "$PR_ROOT/marker-cid" ]; then
+  "$GH_IO" delete-comment --repo "$OWNER_REPO" --id-file "$PR_ROOT/marker-cid" \
+    || echo "The in-flight marker on PR #$PR_NUMBER could not be removed via REST or GraphQL — say so in your final message and tell the user to delete it by hand, or the next loop on this PR is blocked for ~75 min." >&2
 fi
 ```
 
-(`$OWNER_REPO` is the `nameWithOwner` from Phase 0 Step 3. If the marker was never posted — e.g. an early preflight exit — `MARKER_CID` is unset, `$PR_ROOT/marker-cid` doesn't exist, and this is a no-op.)
+(`$OWNER_REPO` is the `nameWithOwner` from Phase 0 Step 3.) A 404 counts as success — the marker being gone is the goal, however it got there. If the delete genuinely fails, **report it in your final message**; don't let it live and die as a stderr line the user never sees.
 
 **Both modes**: report the final status and PR URL to the user.
+
+### CI reconciliation (why the marker is not the last word)
+
+`claude --print` exits 0 whenever the model produced text, so nothing about *this* skill's own exit can prove the loop finished. Under CI the workflow therefore runs `gh-io.sh reconcile` with `if: always()` after the loop: it removes any marker still standing and fails the job with `::error::` annotations if the summary never landed. That is the check that would have caught reduction#10, where two runs reported success over a locked PR with no verdict. Nothing here needs to *call* reconcile — just know that the `pr-review-loop:summary` marker and the `$PR_ROOT/marker-cid` file are the contract it reads, so don't hand-roll either.
 
 ## Bundled files
 
@@ -515,6 +538,7 @@ fi
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
 - `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
 - `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
+- `scripts/gh-io.sh` — every GitHub **write** the loop makes (marker post, marker delete, summary post), with retry + a REST→GraphQL fallback; also the `reconcile` the CI workflow runs to prove the loop finished (Phase 0.5, Phase 5)
 - `scripts/selftest.sh` — runnable coverage for all of the above (no repo CI; run `bash scripts/selftest.sh`)
 - `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, `_scoped.txt` (scoped-verify addendum), and one persona file per agent
 - `agent-prompts.md` — documents the fragments and assembly order (no longer hand-assembled)
