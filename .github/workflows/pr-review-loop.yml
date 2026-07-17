@@ -37,9 +37,14 @@ jobs:
       # to scope its "did the summary land?" check to THIS run, so a summary
       # left by an EARLIER review on the same PR can't mask a current failure.
       # Comment ids are monotonic, so this needs no clock agreement with GitHub.
-      # Best-effort: if gh-io.sh isn't found or the read fails, fall back to 0
-      # ("any summary ever") — weaker, but it never false-alarms. The skill
-      # installs to $CLAUDE_CONFIG_DIR/skills (see pr-runner/entrypoint.sh).
+      # Two failure modes, handled differently — a blanket `|| echo 0` would turn
+      # BOTH into a false SUCCESS (after=0 means "any summary ever", so a stale
+      # earlier summary would satisfy reconcile even if THIS run died):
+      #   - gh-io.sh not found → the runner's skill predates the backstop; soft
+      #     after=0 + ::warning:: (the reconcile step below then skips loudly).
+      #   - gh-io.sh found but the query fails (after its own internal retries) →
+      #     a real outage; hard-fail rather than silently mask this run.
+      # The skill installs to $CLAUDE_CONFIG_DIR/skills (see pr-runner/entrypoint.sh).
       - name: Capture pre-loop comment baseline
         id: baseline
         env:
@@ -50,9 +55,12 @@ jobs:
           GH_IO="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/pr-review-loop/scripts/gh-io.sh"
           [ -x "$GH_IO" ] || GH_IO="$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -type f -name gh-io.sh -path '*pr-review-loop*' 2>/dev/null | head -1)"
           if [ -n "$GH_IO" ] && [ -x "$GH_IO" ]; then
-            after="$("$GH_IO" newest-comment-id --repo "$GITHUB_REPOSITORY" --pr "$PR" 2>/dev/null || echo 0)"
+            if ! after="$("$GH_IO" newest-comment-id --repo "$GITHUB_REPOSITORY" --pr "$PR")"; then
+              echo "::error title=pr-review-loop::gh-io.sh newest-comment-id failed (after its own internal retries) — refusing to fall back to --after 0, which could let a stale summary from an earlier run mask this run's failure. Re-run the job."
+              exit 1
+            fi
           else
-            echo "::warning title=pr-review-loop::gh-io.sh not found — reconcile will fall back to --after 0."
+            echo "::warning title=pr-review-loop::gh-io.sh not found — the runner's skill predates the reconcile backstop (needs >= 0.9.0); the step below will skip. Recording after=0."
             after=0
           fi
           echo "after=${after:-0}" >> "$GITHUB_OUTPUT"
@@ -100,8 +108,12 @@ jobs:
       # min) and EXITS NON-ZERO with ::error:: annotations if no summary newer
       # than the baseline landed — turning a silent dead loop into a red job you
       # can re-run. This is the check the skill's own docs assume CI runs
-      # (SKILL.md "CI reconciliation"); the runner was missing it. if: always()
-      # so a failed / timed-out / cancelled loop is still reconciled.
+      # (SKILL.md "CI reconciliation"); the runner was missing it. If the runner's
+      # installed skill is too old to ship gh-io.sh (< 0.9.0) this step WARNS and
+      # skips instead of failing, so it's safe to merge ahead of the runner
+      # update and starts enforcing automatically once the runner re-clones a
+      # >= 0.9.0 skill. if: always() so a failed / timed-out / cancelled loop is
+      # still reconciled.
       - name: Reconcile end-of-loop state
         if: always()
         env:
@@ -113,8 +125,8 @@ jobs:
           [ -n "$GH_IO" ] && [ -x "$GH_IO" ] || GH_IO="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/pr-review-loop/scripts/gh-io.sh"
           [ -x "$GH_IO" ] || GH_IO="$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -type f -name gh-io.sh -path '*pr-review-loop*' 2>/dev/null | head -1)"
           if [ -z "$GH_IO" ] || [ ! -x "$GH_IO" ]; then
-            echo "::error title=pr-review-loop reconcile unavailable::gh-io.sh not found under CLAUDE_CONFIG_DIR — cannot verify the loop finished or clean up a stuck marker. Check the runner's skill install."
-            exit 1
+            echo "::warning title=pr-review-loop reconcile skipped::gh-io.sh not found under CLAUDE_CONFIG_DIR — the runner's installed pr-review-loop skill predates the reconcile backstop (needs >= 0.9.0), so this run's completion was NOT verified. To enable enforcement: merge the 0.9.0 skill to the plugins repo's main and redeploy the pr-runner service so it re-clones the skill. Skipping (not failing) so this step is safe to ship ahead of the runner update."
+            exit 0
           fi
           "$GH_IO" reconcile --repo "$GITHUB_REPOSITORY" --pr "$PR" \
             --after "${{ steps.baseline.outputs.after || '0' }}"
