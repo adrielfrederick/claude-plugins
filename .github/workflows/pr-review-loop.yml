@@ -32,6 +32,32 @@ jobs:
           git config user.name  "pr-review-bot"
           git config user.email "pr-review-bot@users.noreply.github.com"
 
+      # Baseline for the reconcile backstop below: the id of the newest PR
+      # comment BEFORE the loop runs. `gh-io.sh reconcile --after <id>` uses it
+      # to scope its "did the summary land?" check to THIS run, so a summary
+      # left by an EARLIER review on the same PR can't mask a current failure.
+      # Comment ids are monotonic, so this needs no clock agreement with GitHub.
+      # Best-effort: if gh-io.sh isn't found or the read fails, fall back to 0
+      # ("any summary ever") — weaker, but it never false-alarms. The skill
+      # installs to $CLAUDE_CONFIG_DIR/skills (see pr-runner/entrypoint.sh).
+      - name: Capture pre-loop comment baseline
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          GH_IO="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/pr-review-loop/scripts/gh-io.sh"
+          [ -x "$GH_IO" ] || GH_IO="$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -type f -name gh-io.sh -path '*pr-review-loop*' 2>/dev/null | head -1)"
+          if [ -n "$GH_IO" ] && [ -x "$GH_IO" ]; then
+            after="$("$GH_IO" newest-comment-id --repo "$GITHUB_REPOSITORY" --pr "$PR" 2>/dev/null || echo 0)"
+          else
+            echo "::warning title=pr-review-loop::gh-io.sh not found — reconcile will fall back to --after 0."
+            after=0
+          fi
+          echo "after=${after:-0}" >> "$GITHUB_OUTPUT"
+          echo "gh_io=${GH_IO:-}"  >> "$GITHUB_OUTPUT"
+
       - name: Run pr-review-loop
         env:
           # Claude (author/orchestrator) authenticates with a long-lived
@@ -53,6 +79,67 @@ jobs:
           # property of the runner (its container can't run bubblewrap), so the
           # runner's entrypoint.sh exports it. Keeping it off the portable
           # workflow means other runners aren't forced into unsandboxed Codex.
+        # Model is intentionally UNPINNED — the CLI and its default model drift
+        # with upstream, and the reconcile step below makes any drift-induced
+        # failure loud (red job) instead of silent, so we trade "always current"
+        # for "occasionally re-run by hand". BREAK-GLASS: if reconcile starts
+        # reliably failing after a model/CLI bump (the loop backgrounds its Codex
+        # batch and yields, which claude --print never resumes), pin the last
+        # known-good model by adding `--model claude-opus-4-8` to the call below.
         run: |
           claude --print --dangerously-skip-permissions \
-            "Run the /pr-review-loop skill on this branch's open PR (#${{ github.event.pull_request.number }}). Quiet mode — post a single summary comment at the end."
+            "Run the /pr-review-loop skill on this branch's open PR (#${{ github.event.pull_request.number }}). Quiet mode — post a single summary comment at the end. Drive the ENTIRE loop to completion within this one turn: block inline on each Codex review batch by running the launcher as a single foreground bash call (the Bash tool-timeout is raised above for exactly this). Do NOT background the batch and then stop to 'wait' to be notified — under 'claude --print' you are never resumed, so a backgrounded batch is orphaned and killed and the loop dies with no summary."
+
+      # Deterministic, model- and CLI-proof backstop. `claude --print` exits 0
+      # whenever the model produced ANY text, so the step above being green does
+      # NOT prove the loop finished — a loop that died mid-way (e.g. backgrounded
+      # its Codex batch and yielded the turn, which claude --print never resumes)
+      # leaves the in-flight marker up and posts no summary, yet still exits 0.
+      # `gh-io.sh reconcile` reads GitHub comment state directly: it removes any
+      # leftover marker (so a dead run can't false-block the next one for ~75
+      # min) and EXITS NON-ZERO with ::error:: annotations if no summary newer
+      # than the baseline landed — turning a silent dead loop into a red job you
+      # can re-run. This is the check the skill's own docs assume CI runs
+      # (SKILL.md "CI reconciliation"); the runner was missing it. if: always()
+      # so a failed / timed-out / cancelled loop is still reconciled.
+      - name: Reconcile end-of-loop state
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          GH_IO="${{ steps.baseline.outputs.gh_io }}"
+          [ -n "$GH_IO" ] && [ -x "$GH_IO" ] || GH_IO="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/pr-review-loop/scripts/gh-io.sh"
+          [ -x "$GH_IO" ] || GH_IO="$(find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" -type f -name gh-io.sh -path '*pr-review-loop*' 2>/dev/null | head -1)"
+          if [ -z "$GH_IO" ] || [ ! -x "$GH_IO" ]; then
+            echo "::error title=pr-review-loop reconcile unavailable::gh-io.sh not found under CLAUDE_CONFIG_DIR — cannot verify the loop finished or clean up a stuck marker. Check the runner's skill install."
+            exit 1
+          fi
+          "$GH_IO" reconcile --repo "$GITHUB_REPOSITORY" --pr "$PR" \
+            --after "${{ steps.baseline.outputs.after || '0' }}"
+
+      # The loop writes its full telemetry — per-round prompts, Codex reviews,
+      # agent logs (token counts, session headers), and history.md — under
+      # /tmp/pr-review/. Without this upload it's only reachable by shelling
+      # into the runner container, and is lost entirely on a redeploy. Capture
+      # it as an artifact (if: always() so a failed/timed-out loop is still
+      # inspectable). Caveat: the runner container is LONG-LIVED across jobs,
+      # so the PR dir can also contain earlier runs on the same PR (the skill
+      # GCs run dirs older than 7 days) — check the run-dir timestamps when
+      # debugging. run_attempt keeps the name unique on a UI "Re-run job"
+      # (run_id alone is constant across attempts and upload-artifact@v4
+      # hard-fails on a duplicate name).
+      # Both paths are listed to tolerate plugin-version skew: skill >= 0.7.0
+      # namespaces by repo (/tmp/pr-review/<owner__repo>/<PR>/), older versions
+      # use the bare PR number. Only the existing one is picked up.
+      - name: Upload review-loop transcripts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-loop-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/pr-review/${{ github.repository_owner }}__${{ github.event.repository.name }}/${{ github.event.pull_request.number }}/
+            /tmp/pr-review/${{ github.event.pull_request.number }}/
+          retention-days: 14
+          if-no-files-found: warn
