@@ -417,6 +417,24 @@ check "refresh: changed-files written"     '[ -s "$PK/changed-files.txt" ]'
 printf 'stale\n' > "$PK/files/stale.patch"
 PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main >/dev/null
 check "refresh: stale split removed on re-run" '[ ! -f "$PK/files/stale.patch" ]'
+# Dot-path-only PR: every changed file lives under a dot-directory, so every
+# per-file split name begins with a dot. A plain `ls` omits dotfiles, which left
+# the manifest EMPTY → agents saw "0 files to review" → a vacuous "clean" review.
+# `ls -A` must include them. (Live repro: a .github/workflows/*.yml-only PR.)
+FRD="$WORK/fixture-dotonly"
+git init -q -b main "$FRD" 2>/dev/null || { git init -q "$FRD"; git -C "$FRD" checkout -qb main; }
+git -C "$FRD" config user.email t@t; git -C "$FRD" config user.name t
+mkdir -p "$FRD/.github/workflows"
+printf 'name: ci\non: push\n' > "$FRD/.github/workflows/pr.yml"
+git -C "$FRD" add -A; git -C "$FRD" commit -qm base
+git -C "$FRD" checkout -qb feature
+printf 'jobs: {}\n' >> "$FRD/.github/workflows/pr.yml"
+git -C "$FRD" add -A; git -C "$FRD" commit -qm change
+PKD="$WORK/packet-dotonly"; mkdir -p "$PKD"
+PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FRD" --packet "$PKD" --pr 1 --base main >/dev/null
+check "refresh: dot-only PR splits the dotfile"    '[ -f "$PKD/files/.github__workflows__pr.yml.patch" ]'
+check "refresh: dot-only manifest is non-empty"    '[ -s "$PKD/manifest.txt" ]'
+check "refresh: dot-only manifest lists the split" 'grep -qx ".github__workflows__pr.yml.patch" "$PKD/manifest.txt"'
 # Runner case: no local base branch, but a remote-tracking ref exists.
 BASESHA="$(git -C "$FR" rev-parse main)"
 git -C "$FR" update-ref refs/remotes/origin/main "$BASESHA"

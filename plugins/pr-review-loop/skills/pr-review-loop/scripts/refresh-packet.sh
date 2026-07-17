@@ -70,7 +70,13 @@ awk -v outdir="$PACKET/files" '
 ' "$PACKET/diff.patch"
 # manifest.txt: exact per-file patch names, so agents read the right files
 # instead of guessing paths or running `find` (the PR 470 token sink).
-ls "$PACKET/files" > "$PACKET/manifest.txt"
+# -A is load-bearing: per-file splits of dot-path changes begin with a dot
+# (e.g. .github/workflows/x.yml → .github__workflows__x.yml.patch). A plain
+# `ls` omits dotfiles, so a PR that touches ONLY dot-path files yields an EMPTY
+# manifest — every agent then sees "0 files to review" and the loop reports a
+# vacuous "clean". -A includes them while still excluding . and .. (found live
+# on a .github/workflows/*.yml-only PR).
+ls -A "$PACKET/files" > "$PACKET/manifest.txt"
 
 git -C "$REPO" diff "$BASE_REF"...HEAD -U30 > "$PACKET/diff-wide.patch"
 git -C "$REPO" diff --stat "$BASE_REF"...HEAD > "$PACKET/changed-files.txt"
