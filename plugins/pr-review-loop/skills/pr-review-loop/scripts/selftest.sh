@@ -451,6 +451,231 @@ git -C "$FR" branch -q main HEAD
 check "refresh: empty diff dies"           '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main 2>/dev/null'
 check "refresh: not-a-repo dies"           '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$WORK" --packet "$PK" --pr 1 --base main 2>/dev/null'
 
+echo "== gh-io.sh (fake gh: REST/GraphQL health is switchable) =="
+GHIO="$DIR/gh-io.sh"
+if ! command -v jq >/dev/null 2>&1; then
+  echo "  (skip: jq not installed — the gh-io tests need jq)"
+else
+# A fake `gh` backed by a real comment store, so the REST→GraphQL fallback is
+# exercised end-to-end rather than mocked at the seam. FAKE_MODE picks which
+# transport is healthy: `rest-down` reproduces the 2026-07-16 incident (REST
+# 5xx, GraphQL fine), `rest-html` the degraded-proxy variant where REST exits 0
+# but hands back an HTML error page. The fake applies gh-io's own `--jq` filters
+# to the JSON it serves, so a drifted filter fails here instead of in a live run.
+cat > "$BIN/gh" <<'FAKE'
+#!/usr/bin/env bash
+set -u
+MODE="${FAKE_MODE:-ok}"
+STORE="${FAKE_STORE:?}"
+[ -s "$STORE" ] || printf '[]' > "$STORE"
+
+JQF=""; SLURP=0; args=(); i=1
+while [ $i -le $# ]; do
+  a="${!i}"
+  case "$a" in
+    --jq)    i=$((i+1)); JQF="${!i}" ;;
+    --slurp) SLURP=1; args+=("$a") ;;
+    *)       args+=("$a") ;;
+  esac
+  i=$((i+1))
+done
+set -- ${args[@]+"${args[@]}"}
+# Mirror the real gh: --slurp and --jq are mutually exclusive. Without this the
+# fake happily accepts a combination that fails in production — which is exactly
+# how the REST list fallback shipped broken and passed its tests.
+if [ "$SLURP" = "1" ] && [ -n "$JQF" ]; then
+  echo 'the `--slurp` option is not supported with `--jq` or `--template`' >&2; exit 1
+fi
+
+emit() { if [ -n "$JQF" ]; then printf '%s' "$1" | jq -r "$JQF"; else printf '%s' "$1"; fi; }
+argval() { for a in "$@"; do case "$a" in "$PREFIX"*) printf '%s' "${a#$PREFIX}"; return;; esac; done; }
+body_arg() { PREFIX="body=@"; local f; f="$(argval "$@")"; [ -n "$f" ] && cat "$f"; }
+
+[ "${1:-}" = "api" ] || { echo "fake gh: unsupported: $*" >&2; exit 1; }
+shift
+
+if [ "${1:-}" = "graphql" ]; then
+  case "$MODE" in all-down|graphql-down) echo "GraphQL: 503 Service Unavailable" >&2; exit 1 ;; esac
+  PREFIX="query="; Q="$(argval "$@")"
+  case "$Q" in
+    *"pullRequest(number:\$n){id}"*)
+      emit '{"data":{"repository":{"pullRequest":{"id":"PR_NODE"}}}}' ;;
+    *addComment*)
+      B="$(body_arg "$@")"
+      NEXT=$(( $(jq -r '[.[].databaseId] | max // 100' "$STORE") + 1 ))
+      jq --argjson n "$NEXT" --arg b "$B" '. + [{databaseId:$n, id:"NODE_\($n)", body:$b}]' \
+        "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE"
+      emit "$(jq -nc --argjson n "$NEXT" '{data:{addComment:{commentEdge:{node:{databaseId:$n,id:"NODE_\($n)"}}}}}')" ;;
+    *deleteIssueComment*)
+      PREFIX="id="; NID="$(argval "$@")"
+      jq -e --arg i "$NID" 'any(.[]; .id == $i)' "$STORE" >/dev/null \
+        || { echo "Could not resolve to a node with the global id of '$NID'" >&2; exit 1; }
+      jq --arg i "$NID" 'map(select(.id != $i))' "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE"
+      emit '{"data":{"deleteIssueComment":{"clientMutationId":null}}}' ;;
+    *"comments(last:100)"*)
+      emit "$(jq -c '{data:{repository:{pullRequest:{comments:{nodes:.}}}}}' "$STORE")" ;;
+    *) echo "fake gh: unhandled query: $Q" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+
+# ── REST ──
+if [ "$MODE" = "rest-down" ] || [ "$MODE" = "all-down" ]; then
+  echo "gh: HTTP 503: Service Unavailable" >&2; exit 1
+fi
+if [ "$MODE" = "rest-html" ]; then
+  # Exits 0 with an HTML error page — the shape gh-io must reject rather than
+  # persist as a comment id.
+  printf '<html><head><title>GitHub Unicorn</title></head></html>'; exit 0
+fi
+METHOD=GET; PATH_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) METHOD="$2"; shift 2 ;;
+    -f|-F) shift 2 ;;
+    --paginate|--slurp) shift ;;
+    *) PATH_ARG="$1"; shift ;;
+  esac
+done
+case "$METHOD/$PATH_ARG" in
+  POST/*/comments)
+    B="$(body_arg "$@")"; B="${B:-$(cat "${FAKE_BODY:-/dev/null}")}"
+    NEXT=$(( $(jq -r '[.[].databaseId] | max // 100' "$STORE") + 1 ))
+    jq --argjson n "$NEXT" --arg b "$B" '. + [{databaseId:$n, id:"NODE_\($n)", body:$b}]' \
+      "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE"
+    emit "$(jq -nc --argjson n "$NEXT" '{id:$n, node_id:"NODE_\($n)"}')" ;;
+  DELETE/*/issues/comments/*)
+    CID="${PATH_ARG##*/}"
+    jq -e --argjson c "$CID" 'any(.[]; .databaseId == $c)' "$STORE" >/dev/null \
+      || { echo "gh: HTTP 404: Not Found" >&2; exit 1; }
+    jq --argjson c "$CID" 'map(select(.databaseId != $c))' "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE" ;;
+  GET/*/comments*)
+    emit "$(jq -c '[[.[] | {id:.databaseId, node_id:.id, body:.body}]]' "$STORE")" ;;
+  *) echo "fake gh: unhandled REST $METHOD $PATH_ARG" >&2; exit 1 ;;
+esac
+FAKE
+chmod +x "$BIN/gh"
+
+# The fake's REST POST loses `-F body=@…` to the flag-stripping loop above, so
+# hand it the same file out-of-band. Real gh reads the flag; only the fake needs this.
+export FAKE_BODY
+GS="$WORK/gh-store.json"
+BODYF="$WORK/marker-body.txt"; FAKE_BODY="$BODYF"
+printf '🔒 pr-review-loop running on `h1` <!-- pr-review-loop:running h1 1700000000 -->\n' > "$BODYF"
+IDF="$WORK/marker-cid"
+# Keep the backoff at 0 so the failure paths don't actually sleep ~60s.
+export GH_IO_BACKOFF=0 GH_IO_ATTEMPTS=2
+
+reset_store() { printf '[]' > "$GS"; rm -f "$IDF"; }
+
+# Healthy REST: the ordinary path still works.
+reset_store
+out="$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" 2>/dev/null)"
+check "gh-io: post via REST returns id + node" 'printf "%s" "$out" | grep -qx "101 NODE_101"'
+check "gh-io: post persists the --id-file"     'grep -qx "101 NODE_101" "$IDF"'
+
+# The incident shape: REST 5xx, GraphQL healthy. Must fall back, not lose the post.
+reset_store
+out="$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-down bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" 2>/dev/null)"
+check "gh-io: post falls back to GraphQL when REST 5xx" 'printf "%s" "$out" | grep -qx "101 NODE_101"'
+check "gh-io: GraphQL-posted comment is in the store"   'jq -e "length == 1" "$GS" >/dev/null'
+
+# Degraded proxy: REST exits 0 with HTML. The id shape-check must reject it and
+# fall back — persisting "<html>" as a comment id would strand the marker forever.
+reset_store
+out="$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-html bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" 2>/dev/null)"
+check "gh-io: post rejects an HTML 200 and falls back" 'printf "%s" "$out" | grep -qx "101 NODE_101"'
+check "gh-io: id-file never holds an HTML body"        'grep -qx "101 NODE_101" "$IDF"'
+
+# Both down: must exit NON-ZERO. This is the whole point — a swallowed failure
+# here is what let reduction#10 report a green run over a locked PR.
+reset_store
+check "gh-io: post exits nonzero when both APIs are down" \
+  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=all-down bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" 2>/dev/null'
+check "gh-io: no id-file written on total failure" '[ ! -f "$IDF" ]'
+
+# delete-comment: reads the pair from --id-file, falls back, clears the file.
+reset_store
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-down bash "$GHIO" delete-comment --repo o/r --id-file "$IDF" >/dev/null 2>&1
+check "gh-io: delete falls back to GraphQL"    'jq -e "length == 0" "$GS" >/dev/null'
+check "gh-io: delete clears the --id-file"     '[ ! -f "$IDF" ]'
+
+# A 404 is the goal state, not an error — a retry racing its own success, or a
+# marker a human already removed, must not fail the run.
+reset_store
+check "gh-io: delete treats 404 as success" \
+  'PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" delete-comment --repo o/r --cid 999 2>/dev/null'
+check "gh-io: delete without a node id fails loudly when REST is down" \
+  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-down bash "$GHIO" delete-comment --repo o/r --cid 999 2>/dev/null'
+
+# newest-comment-id: the monotonic baseline reconcile scopes its check with.
+reset_store
+check "gh-io: newest-comment-id is 0 on an empty PR" \
+  '[ "$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" newest-comment-id --repo o/r --pr 7 2>/dev/null)" = "0" ]'
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" >/dev/null 2>&1
+check "gh-io: newest-comment-id returns the max" \
+  '[ "$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" newest-comment-id --repo o/r --pr 7 2>/dev/null)" = "101" ]'
+
+echo "== gh-io.sh reconcile (the reduction#10 regression) =="
+SUMF="$WORK/summary-body.txt"
+printf 'CLAUDE: Automated Review Summary\nStatus: CLEAN\n<!-- pr-review-loop:summary -->\n' > "$SUMF"
+
+# Exactly the reduction#10 end state: marker still up, summary never posted.
+reset_store
+FAKE_BODY="$BODYF"
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
+rec="$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --id-file "$IDF" --after 100 2>&1)"; rc=$?
+check "reconcile: exits nonzero on the orphaned-lock end state" '[ "$rc" -ne 0 ]'
+check "reconcile: annotates the leftover lock"   'printf "%s" "$rec" | grep -q "::error title=pr-review-loop lock left behind::"'
+check "reconcile: annotates the missing summary" 'printf "%s" "$rec" | grep -q "::error title=pr-review-loop summary missing::"'
+check "reconcile: actually removes the lock"     'jq -e "length == 0" "$GS" >/dev/null'
+check "reconcile: clears the --id-file"          '[ ! -f "$IDF" ]'
+
+# Reconcile must be able to clean up during the very incident that strands the
+# lock — REST down is when it is needed most.
+reset_store
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-down bash "$GHIO" reconcile --repo o/r --pr 7 --id-file "$IDF" --after 100 >/dev/null 2>&1
+check "reconcile: removes the lock over GraphQL when REST is down" 'jq -e "length == 0" "$GS" >/dev/null'
+
+# The mirror case exercises the REST comment-list fallback, which is otherwise
+# dead code (reconcile reads via GraphQL first). `gh api --slurp` is rejected
+# alongside `--jq`, so this is the test that keeps that path honest.
+reset_store
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
+rec="$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=graphql-down bash "$GHIO" reconcile --repo o/r --pr 7 --id-file "$IDF" --after 100 2>&1)"
+check "reconcile: lists over REST when GraphQL is down" 'printf "%s" "$rec" | grep -q "lock left behind"'
+check "reconcile: removes the lock over REST when GraphQL is down" 'jq -e "length == 0" "$GS" >/dev/null'
+
+# A properly finished loop: marker removed, summary posted → silent success.
+reset_store
+FAKE_BODY="$SUMF"
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$SUMF" >/dev/null 2>&1
+check "reconcile: clean loop exits 0" \
+  'PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --after 100 2>/dev/null'
+
+# --after is what scopes the check to THIS run: a summary from an EARLIER loop
+# on the same PR must not vouch for a run that posted nothing. Without this the
+# second reduction#10 run would have passed on the first run's comment.
+check "reconcile: a stale summary below --after does not count" \
+  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --after 101 2>/dev/null'
+
+# The token, not the prose, is the contract — a human comment quoting the
+# summary's heading must not satisfy the check.
+reset_store
+FAKE_BODY="$WORK/prose.txt"
+printf 'I looked for the CLAUDE: Automated Review Summary and it never showed up.\n' > "$WORK/prose.txt"
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$WORK/prose.txt" >/dev/null 2>&1
+check "reconcile: prose about the summary is not a summary" \
+  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --after 100 2>/dev/null'
+
+check "gh-io: bad --repo dies"  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" newest-comment-id --repo notaslug --pr 7 2>/dev/null'
+check "gh-io: bad --pr dies"    '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" newest-comment-id --repo o/r --pr x 2>/dev/null'
+check "gh-io: empty body dies"  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" post-comment --repo o/r --pr 7 --body-file /dev/null 2>/dev/null'
+check "gh-io: unknown subcommand dies" '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" frobnicate 2>/dev/null'
+fi
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
