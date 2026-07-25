@@ -329,7 +329,9 @@ The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent i
 
 **Watchdog rationale (why the script wraps each agent in a deadline poll):** codex has no reliable internal wall cap, and the loop-level `TIMEOUT_SECONDS=3600` is checked only *between* rounds (Phase 4) — it cannot interrupt a round that is currently hung. Log analysis found the median agent finishes in 2–10 min, but a handful of rounds ran **28–167 minutes** because codex sat in API-degradation/network backoff (or the laptop slept mid-run); token counts were normal, so the time was pure stall — and those tails were ~⅔ of all review-loop wall time. The per-agent deadline `AGENT_TIMEOUT_SECONDS` (default 900s) sits far above every legitimate agent and far below every observed stall. The poll is **deadline-based, not `sleep N && kill`** (a sleep timer is itself suspended on machine sleep and would never fire; a deadline poll compares wall-clock each tick and kills on the first tick after wake) — this guards server-side network stalls on the runner as well as laptop sleep. A watchdog-killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-<role>.txt`; Step 5 treats that as "no findings this round."
 
-**Run `$LAUNCH_AGENTS` as ONE foreground bash call**, with a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS` (the CI runner sets a high `BASH_DEFAULT_TIMEOUT_MS` for this). The script blocks internally — it launches the batch, then `wait`s until every codex PID has completed or been watchdog-killed, then writes `$ROUND_DIR/.done` — so the whole round stays inside one turn. **Do NOT** background the launch and then stop/yield to "wait" for it: per the Runtime note above, a non-interactive `claude --print` run is never resumed, so a backgrounded batch is orphaned and killed the instant you stop and the loop dies with no summary. (If a single call would exceed your bash tool-timeout, poll in-turn instead: start `$LAUNCH_AGENTS` `nohup`-detached, then loop short `sleep`+check bash calls until `$ROUND_DIR/.done` exists — still never yielding the turn.)
+**Run `$LAUNCH_AGENTS` as ONE foreground bash call**, with a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS` (the CI runner sets a high `BASH_DEFAULT_TIMEOUT_MS` for this). The script blocks internally — it launches the batch, then `wait`s until every codex PID has completed or been watchdog-killed, then writes `$ROUND_DIR/.done` — so the whole round stays inside one turn. **Do NOT** background the launch and then stop/yield to "wait" for it: per the Runtime note above, a non-interactive `claude --print` run is never resumed, so a backgrounded batch is orphaned and killed the instant you stop and the loop dies with no summary. (If a single call would exceed your bash tool-timeout, poll in-turn instead: start `$LAUNCH_AGENTS` `nohup`-detached, then loop short `sleep`+check bash calls until `$ROUND_DIR/.done` exists — still never yielding the turn. **Bound that poll by a deadline** and treat expiry as a round failure, never as "keep waiting".)
+
+**The poll-in-turn escape hatch above is for `$LAUNCH_AGENTS` only.** It is safe there for two specific reasons: the script writes `.done` as a discrete sentinel the instant it finishes, and it watchdog-kills its own agents, so the thing being polled is guaranteed to terminate. **Do not generalize it to other long-running commands** — build, typecheck, or test runs (see Phase 3 Step 4). Polling for one of those to finish re-creates the very hang the watchdog exists to prevent, because nothing is bounding the command itself. And never poll a file fed by a buffering pipeline: `cmd | tail -60` writes *nothing* until `cmd` reaches EOF, so a poll waiting for content in that file cannot succeed until the command it is waiting on has already exited.
 
 **Systemic-degradation guard:** if **every** agent in a round was watchdog-killed (all outputs are the sentinel / empty), do not treat the round as clean — set status `CODEX_DEGRADED` and **go to Phase 5** (so the wrap-up posts and the in-flight marker is removed), telling the user codex was unreachable/stalled and to retry later. A partial kill (some agents produced real output) proceeds normally on the agents that completed.
 
@@ -366,6 +368,35 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    git push
    ```
 4. **In parallel with posting/reporting**, run full validation (lint check, build/typecheck, tests). Commands come from CLAUDE.md / project config. If validation fails, fix, amend, force-push with `--force-with-lease`.
+
+   **Every validation command must be bounded, and its output must survive.** The
+   agent-watchdog rationale in Phase 1 Step 4 applies here verbatim: `TIMEOUT_SECONDS`
+   is only checked *between* rounds, so it cannot interrupt a validation command
+   hanging inside one. Run each as:
+
+   ```bash
+   timeout "${VALIDATE_TIMEOUT_SECONDS:-900}" <command> > "$ROUND_DIR/validate-<name>.log" 2>&1
+   rc=$?
+   tail -60 "$ROUND_DIR/validate-<name>.log"    # read the FILE, after the fact
+   ```
+
+   - **Never pipe the command into `tail`/`head`.** `cmd | tail -60` emits nothing
+     until `cmd` reaches EOF, so a command that hangs leaves a **zero-byte** log and
+     destroys the one artifact that would name the culprit. Redirect to a file and
+     `tail` the file afterwards — then partial output survives the kill.
+   - **Exit 124 (timed out) is a validation FAILURE.** Report which command timed out
+     and at what bound; do not re-run it, and do not wait on it. A hang is a finding
+     about the project, not an obstacle to work around.
+   - **Never poll for a validation command to finish** — see the escape-hatch note in
+     Phase 1 Step 4.
+
+   **Why this is spelled out:** a runner loop on a large PR ran a project's full test
+   suite unbounded. One test wedged at 0% CPU; the `| tail -60` pipe kept its log at
+   zero bytes; the loop then started a 25-minute poll waiting for content in that
+   file — which could not arrive until the very command it was waiting on exited.
+   The job died at CI's 75-minute cap. Round 0's reviews had **already completed
+   successfully**; the entire run was thrown away after the work was done, and no
+   summary was ever posted.
 5. **Verbose mode**: post `CLAUDE:` response comment per `verbose-mode.md`. **Quiet mode**: report locally.
 6. **Update `$HISTORY`**: append this round's round-summary + resolved items to `## Recent Rounds` (trim to last 2); append each pushback to `## All Prior Pushbacks` (grows forever).
 7. **Classify this round's change** (Phase 4 uses it to decide whether the next round can be a cheaper scoped verify). Look at the files you changed this round and set `LAST_FIX_CLASS`:
@@ -478,7 +509,7 @@ CLAUDE: Automated Review Summary
 - `file:line` — {suggestion}
 
 ## Validation
-- Lint / Build / Tests: PASS/FAIL (X passed, Y failed)
+- Lint / Build / Tests: PASS/FAIL/TIMEOUT (X passed, Y failed; name any command that hit its bound and the bound it hit)
 
 ## Commits
 {list of fixup SHAs with one-line descriptions}
