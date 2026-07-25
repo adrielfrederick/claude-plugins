@@ -367,6 +367,23 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    git commit --fixup=$FIXUP_TARGET -m "fixup! Address CODEX review round {N}"
    git push
    ```
+
+   **You cannot push changes to `.github/workflows/*` when running in CI.** The
+   job's `GITHUB_TOKEN` is a GitHub App token, and the `workflows` permission is
+   not available to it — it isn't a key you can add to the workflow's
+   `permissions:` block, so no amount of config grants it. The push is rejected
+   server-side with *"refusing to allow a GitHub App to create or update workflow
+   … without `workflows` permission"*, and because the rejection lands at push
+   time, a fix committed first has to be unwound.
+
+   So **don't attempt it**: when a finding targets a workflow file and you're
+   running in CI, do not edit it. Route it to `## Remaining Suggestions` as an
+   explicit operator action — name the file, line, and the exact one-line change
+   — and say the loop's token cannot push workflow files. This is a deliberate
+   privilege boundary, not a misconfiguration: the loop executes PR code, so a
+   token that could rewrite CI would let reviewed code rewrite the pipeline that
+   runs on the default branch. On a laptop run (a human's own credentials) the
+   edit is fine — this restriction is CI-only.
 4. **In parallel with posting/reporting**, run full validation (lint check, build/typecheck, tests). Commands come from CLAUDE.md / project config. If validation fails, fix, amend, force-push with `--force-with-lease`.
 
    **Every validation command must be bounded, and its output must survive.** The
