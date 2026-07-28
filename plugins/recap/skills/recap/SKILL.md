@@ -68,7 +68,7 @@ Format: `YYYY-MM-DD - <slug>.md` (absolute date, space-dash-space separator, mat
 
 - Slug comes from `$ARGUMENTS` if provided (e.g. `/recap boost-calibration` → slug = `boost-calibration`)
 - Otherwise, synthesize a short kebab-case slug from the session's dominant theme (3–6 words, e.g. `context-system-design`, `wastegate-oscillation-debug`)
-- Normalize: lowercase, alphanumerics + hyphens only, no leading/trailing hyphens, no consecutive hyphens.
+- **Normalize the slug — whatever its source — before building the filename** (a `$ARGUMENTS` slug is NOT exempt): lowercase; replace every character outside `[a-z0-9-]` with a hyphen; strip leading/trailing hyphens; collapse consecutive hyphens. Dots are the common trap — a version number like `v1.2` must become `v1-2`. This isn't cosmetic: `vault-context`'s server validates the filename against `^\d{4}-\d{2}-\d{2} - [a-z0-9][a-z0-9-]{0,80}\.md$` and rejects (HTTP 400) any slug carrying a `.`, `_`, space, or other stray character, so an unnormalized slug silently fails to sync forever.
 - If a gist for today with the same slug already exists AND it has a DIFFERENT `session_id` in its frontmatter, append a suffix: `- part-2`, `- part-3`, etc. (Don't overwrite a different session's file.) If the existing file has the SAME `session_id`, you ARE re-recapping the same session — overwrite it.
 
 ### 6. Synthesize the gist content
