@@ -55,6 +55,8 @@ If either is missing, stop and tell the user with the install link from the erro
 3. Extract: `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`, `PR_URL`, `OWNER_REPO` (`gh repo view --json nameWithOwner -q .nameWithOwner`).
 4. `START_TIME=$(date +%s)`, `ITERATION=0`, `CONSECUTIVE_CLEAN_ROUNDS=0`.
 5. Safety nets: `MAX_ITERATIONS=10`, `TIMEOUT_SECONDS=3600` (whole-loop, across rounds), `AGENT_TIMEOUT_SECONDS=900` (per-agent wall-clock watchdog — see Phase 1 Step 4). These are caps, NOT budgets — do not reduce thoroughness to fit within them. Note `TIMEOUT_SECONDS` is evaluated only *between* rounds (Phase 4) and so cannot interrupt a round that is currently hung; `AGENT_TIMEOUT_SECONDS` is the guard that actually bounds a single round's wall time.
+
+   **Fix budget (per-PR, spans runs): `MAX_PR_ROUNDS=12`, `MAX_FIX_INDUCED_ROUNDS=3`, `FIX_INDUCED_ROUNDS=0`.** Every cap above resets when a run starts, so they bound a RUN and not a PR — remove and re-add the `review` label and the loop gets a fresh 10 iterations and a fresh hour. A PR the loop cannot converge on therefore grinds on indefinitely, one run at a time, and that is a *different* failure from any single run being too slow: f1-predictions#623 spent 13 rounds across two runs without either run reaching `MAX_ITERATIONS`. `MAX_PR_ROUNDS` counts rounds the PR has had **in total** (Step 8 below) and is what actually terminates such a PR. Both feed the `FIX_BUDGET_EXHAUSTED` exit in Phase 4.
 6. **Locate the bundled scripts.** This skill ships its helper scripts and prompt fragments next to this SKILL.md, under `scripts/` and `prompts/`. Set `SKILL_DIR` to **this skill's base directory** — the absolute path printed as "Base directory for this skill" when the skill loads (equivalently, the directory this SKILL.md lives in). Anchoring on the base dir works for **both** install layouts: standalone (`~/.claude/skills/pr-review-loop`) and plugin (`.../plugins/pr-review-loop/skills/pr-review-loop`).
 
    ```bash
@@ -92,35 +94,46 @@ If either is missing, stop and tell the user with the install link from the erro
 
    **Cross-call state — variables do NOT survive between bash calls.** Every bash snippet below runs in a fresh shell. Loop state (`ITERATION`, `START_TIME`, `CONSECUTIVE_CLEAN_ROUNDS`, `SEVERITY_FLOOR_ACTIVE`, `SCOPED_NEXT`, `SCOPED_THIS`, `LAST_FIX_CLASS`, `LAST_FIX_BASE_SHA`, `ROUND_BASE_SHA`, `MARKER_CID`, paths like `$RUN_DIR`) lives in **your conversation**, not the shell — when you run a snippet, set every variable it reads at the top of that same bash call (re-inline the literal values you're tracking). Never paste a snippet whose variables you haven't defined in that call: an empty `$LAST_FIX_BASE_SHA` makes the scoped delta silently wrong, and an empty `$MARKER_CID` makes the marker deletion a silent no-op. The two values that must survive even a fresh conversation are persisted to disk: `$PR_ROOT/current-run` (this run's dir) and `$PR_ROOT/marker-cid` (written in Phase 0.5, read by Phase 5).
 
-8. **Reconstruct history across environments (PR-resident history).** `$HISTORY` lives in `/tmp`, which dies on a container redeploy and is never shared between the laptop and the runner. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent:
+8. **Reconstruct history + read the fix budget (both PR-resident).** `$HISTORY` lives in `/tmp`, which dies on a container redeploy and is never shared between the laptop and the runner. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent. The same fetch also yields `PRIOR_ROUNDS`, the PR's lifetime round count, which is read on **every** run (not only when the local file is missing) because it is what the Phase 4 fix budget spends:
 
    ```bash
    HISTORY_IO="$SKILL_DIR/scripts/history-io.sh"
-   if [ ! -f "$HISTORY" ]; then
-     # Match the exact HTML opener, not a bare mention — otherwise a human/bot
-     # comment that merely says "pr-review-loop:history" could be picked by `last`
-     # and clobber the real history. Only overwrite if extraction is non-empty.
-     # Warn (don't silently swallow) if the read fails — losing prior pushbacks
-     # silently is exactly the non-convergence this feature exists to prevent.
-     # The selector (history-io.sh history-filter, tested by selftest.sh) requires
-     # the opener at a LINE START, so a comment that only quotes the token in
-     # prose can't be selected by `last` over an older comment holding the real
-     # block. Extraction is anchored the same way — both ends of the round-trip
-     # require a real opener, and both come from the one tested source.
-     if ! body="$(gh pr view "$PR_NUMBER" --json comments \
-       -q "$("$HISTORY_IO" history-filter)" 2>&1)"; then
-       echo "Warning: couldn't read PR comments to reconstruct review history ($body) — proceeding without prior pushback history." >&2
-       body=""
-     fi
-     if [ -n "$body" ]; then
-       extracted="$(printf '%s\n' "$body" | "$HISTORY_IO" extract)"
-       if [ -n "$extracted" ]; then
-         printf '%s\n' "$extracted" > "$HISTORY"
-         echo "Reconstructed \$HISTORY from the PR's prior wrap-up (local file was absent)."
-       fi
+   ROUNDS_FILE="$PR_ROOT/rounds-total"
+   # Fetched UNCONDITIONALLY, not just when $HISTORY is missing: the same block
+   # carries the fix-budget counter below, which has to be read on every run or
+   # the budget silently resets whenever the local file happens to survive.
+   # Match the exact HTML opener, not a bare mention — otherwise a human/bot
+   # comment that merely says "pr-review-loop:history" could be picked by `last`
+   # and clobber the real history. Warn (don't silently swallow) if the read
+   # fails — losing prior pushbacks silently is exactly the non-convergence this
+   # feature exists to prevent.
+   # The selector (history-io.sh history-filter, tested by selftest.sh) requires
+   # the opener at a LINE START, so a comment that only quotes the token in
+   # prose can't be selected by `last` over an older comment holding the real
+   # block. Extraction is anchored the same way — both ends of the round-trip
+   # require a real opener, and both come from the one tested source.
+   if ! body="$(gh pr view "$PR_NUMBER" --json comments \
+     -q "$("$HISTORY_IO" history-filter)" 2>&1)"; then
+     echo "Warning: couldn't read PR comments to reconstruct review history ($body) — proceeding without prior pushback history." >&2
+     body=""
+   fi
+   # Only overwrite $HISTORY if extraction is non-empty AND the local copy is
+   # absent — a live local file is newer than anything on the PR.
+   if [ ! -f "$HISTORY" ] && [ -n "$body" ]; then
+     extracted="$(printf '%s\n' "$body" | "$HISTORY_IO" extract)"
+     if [ -n "$extracted" ]; then
+       printf '%s\n' "$extracted" > "$HISTORY"
+       echo "Reconstructed \$HISTORY from the PR's prior wrap-up (local file was absent)."
      fi
    fi
+   # Rounds this PR has already had, across ALL prior runs — max of the local
+   # file and the PR-resident marker (see history-io.sh for why both exist and
+   # why max is the safe direction). 0 on a first run.
+   PRIOR_ROUNDS="$(printf '%s\n' "$body" | "$HISTORY_IO" rounds-total "$ROUNDS_FILE")"
+   echo "This PR has had $PRIOR_ROUNDS review round(s) before this run (budget: $MAX_PR_ROUNDS)."
    ```
+
+   Carry `PRIOR_ROUNDS` in your conversation state like `ITERATION` — Phase 4 adds the two together, and Phase 5 persists the sum.
 
    The PR is the durable copy; the local file is just the working copy. This makes pushback history a property of the PR, not the machine that happened to run the last loop.
 
@@ -438,6 +451,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 1. `ITERATION++`.
 2. If `$(( $(date +%s) - START_TIME )) >= TIMEOUT_SECONDS` → exit `TIMED_OUT`.
 3. If `ITERATION >= MAX_ITERATIONS` → exit `MAX_ITERATIONS_REACHED`.
+3a. **Fix budget.** `PR_ROUNDS_TOTAL = PRIOR_ROUNDS + ITERATION` (Phase 0 Step 8). If `PR_ROUNDS_TOTAL >= MAX_PR_ROUNDS` → exit `FIX_BUDGET_EXHAUSTED`. This is the only cap that survives a re-label, so it is the one that terminates a PR the loop cannot converge on; check it even when this run is only a round or two old.
 3b. If every agent this round was watchdog-killed (Phase 1 Step 4 systemic-degradation guard) → exit `CODEX_DEGRADED`.
 4. Check exit conditions (first match wins):
 
@@ -447,12 +461,20 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - Last Codex review had 0 CRITICAL and every remaining IMPORTANT is either (a) in "All Prior Pushbacks" with Claude's rebuttal standing, or (b) Claude-declined-with-reasoning this round (**clean-on-pushback** — Claude is explicitly allowed to decline IMPORTANTs without a code change).
    - `CONSECUTIVE_CLEAN_ROUNDS >= 3` (3 rounds without any CRITICAL is strong convergence).
 
-   **Fix-induced findings get no special exit** (changed in 0.7.0 — the old "fix-induced-only ⇒ CLEAN" bullet let just-pushed, never-reviewed fixes ship). When this round's findings only target code added since the *previous* review to fix prior findings (the tail-chasing signature), handle them like any other finding in Phase 3: fix, or decline with evidence. Declining them all with no code change routes through **clean-on-pushback** above — a legitimate CLEAN, the findings were answered. Fixing any of them routes through **Otherwise** below, and the normal `LAST_FIX_CLASS` gate decides whether the verification round is scoped (tests/docs fix) or full (prod fix). Either way, Codex reviews the final pushed state — never exit CLEAN with fixes no reviewer has seen.
+   **Fix-induced findings get no special CLEAN** (changed in 0.7.0 — the old "fix-induced-only ⇒ CLEAN" bullet let just-pushed, never-reviewed fixes ship; that remains forbidden). When this round's findings only target code added since the *previous* review to fix prior findings (the tail-chasing signature), handle them like any other finding in Phase 3: fix, or decline with evidence. Declining them all with no code change routes through **clean-on-pushback** above — a legitimate CLEAN, the findings were answered. Fixing any of them routes through **Otherwise** below, and the normal `LAST_FIX_CLASS` gate decides whether the verification round is scoped (tests/docs fix) or full (prod fix). Either way, Codex reviews the final pushed state — never exit CLEAN with fixes no reviewer has seen.
+
+   What such a round *does* earn is a tick on `FIX_INDUCED_ROUNDS` (see **Otherwise**). Sustained tail-chasing is a signal about the PR, not about any one finding: the fixes keep being reasonable, so no amount of further looping resolves it. `FIX_BUDGET_EXHAUSTED` stops and asks a human — which is emphatically not the CLEAN that 0.7.0 removed.
 
    **NEEDS_HUMAN_REVIEW** if:
    - All issues from the previous round were pushbacks with no code changes AND reviewer is still surfacing the same disagreements (full author/reviewer standoff).
 
+   **FIX_BUDGET_EXHAUSTED** if:
+   - `FIX_INDUCED_ROUNDS >= MAX_FIX_INDUCED_ROUNDS` — three consecutive rounds whose findings *all* targeted code added by the previous round's fix. This is the tail-chasing spiral: each round hardens the hardening, the findings stay individually valid, and the loop cannot reach any CLEAN condition because it legitimately changes code every round. Step 3a is the deterministic backstop that fires regardless; this fires *earlier*, when the signature is unambiguous.
+
+   Both routes exit **non-clean** — the PR is never marked ready and no claim is made that it is good (see Phase 5). That is what makes this safe where the removed 0.7.0 "fix-induced ⇒ CLEAN" bullet was not: the last round's fixes are still unreviewed, and the exit hands them to a human rather than shipping them.
+
    **Otherwise** (Claude made code changes, or a scoped round surfaced a finding — no exit condition met):
+   - **Fix-induced credit:** if **every** finding this round targeted code added since the previous review (the tail-chasing signature described above), increment `FIX_INDUCED_ROUNDS`; **any** finding against pre-existing code resets it to 0. Judge this per round, not per finding — one genuine finding about the original diff means the round is still doing real work.
    - **Clean-round credit (full rounds only):** if this round was a full batch and its review had 0 CRITICAL, increment `CONSECUTIVE_CLEAN_ROUNDS`; a CRITICAL from *any* round (full or scoped) resets it to 0. A scoped round with only IMPORTANT/SUGGESTION findings leaves the counter unchanged — a 2-agent delta review is not full-batch evidence and must not earn severity-floor credit.
    - If `CONSECUTIVE_CLEAN_ROUNDS >= 2`, **raise the severity floor** for the next *full* round (see Phase 1 Step 3 — agents get the 90%-confidence instruction).
    - **Decide the next round's type** (`SCOPED_NEXT`):
@@ -508,12 +530,13 @@ GH_IO="$SKILL_DIR/scripts/gh-io.sh"   # re-set: fresh shell
 ```
 CLAUDE: Automated Review Summary
 <!-- pr-review-loop:summary -->
+<!-- pr-review-loop:rounds {PR_ROUNDS_TOTAL} -->
 
 ## Overview
-- Iterations: {N} rounds ({M} Codex + {N-M} Claude fix)
+- Iterations: {N} rounds this run ({M} Codex + {N-M} Claude fix); {PR_ROUNDS_TOTAL} for this PR across all runs
 - Duration: {minutes}m
 - Agents used: {list}
-- Status: {CLEAN | NEEDS_HUMAN_REVIEW | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
+- Status: {CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
 
 ## Issues Fixed
 - [severity] `file:line` — {original issue} → Fixed: {how}
@@ -538,11 +561,30 @@ CLAUDE: Automated Review Summary
 
 The `pr-review-loop:summary` marker on the second line is **required in both modes** and must be byte-exact. It's how `gh-io.sh reconcile` (and the CI workflow) tells "the loop published its verdict" from "the loop died quietly" — the heading prose is not the contract, since a human comment can quote it. Keep it an HTML comment so it stays invisible in the rendered comment.
 
+The `pr-review-loop:rounds` marker is **required in both modes** and carries `PR_ROUNDS_TOTAL` (= `PRIOR_ROUNDS + ITERATION`) — the PR's lifetime review-round count, which is what makes the Phase 4 fix budget survive a re-label. Write the number as plain digits. Also persist the local copy in the same bash call that posts the wrap-up, so a re-run on the same runner doesn't need to re-read the PR:
+
+```bash
+printf '%s\n' "$PR_ROUNDS_TOTAL" > "$PR_ROOT/rounds-total"
+```
+
+Both copies are written because either can be lost independently (see `history-io.sh`); Phase 0 takes the max. **Write them on every exit, not just `FIX_BUDGET_EXHAUSTED`** — a `TIMED_OUT` run's rounds count against the PR too, and skipping the write there is precisely how #623 would have escaped the budget.
+
 The trailing `pr-review-loop:history` block is **required in both modes** — it's the durable copy of "All Prior Pushbacks" + "Recent Rounds" that Phase 0 reconstructs from when a later loop runs on a fresh machine or after a container redeploy (see Phase 0 Step 8). It's an HTML comment, so it's invisible in the rendered comment. Paste `$HISTORY` verbatim between the markers; the `-->` must be on its own line so the extractor stops there.
 
 Also post inline comments on the diff for pushed-back items and remaining suggestions (reuse the inline-comment posting logic in `verbose-mode.md`, step 4, but only for these unresolved items).
 
 **Verbose mode**: post the short final summary from `verbose-mode.md` — through `gh-io.sh post-comment`, and carrying the same `pr-review-loop:summary` marker and `pr-review-loop:history` block. Individual round comments already tell the story.
+
+### Reporting a `FIX_BUDGET_EXHAUSTED` exit
+
+This exit means "the loop stopped being productive", **not** "the PR is fine" and **not** "the PR is broken". The reader is a human deciding what to do next, so the wrap-up must give them that decision and not a verdict:
+
+- **Say which budget ran out** — `MAX_PR_ROUNDS` (with `PRIOR_ROUNDS` + this run's rounds, so the count across runs is visible) or the `MAX_FIX_INDUCED_ROUNDS` streak.
+- **Flag the unreviewed state explicitly.** The last round's fixes were pushed but never reviewed — that is inherent to stopping here. Name those commits under "Commits" and say plainly that no reviewer has seen them.
+- **Characterise the spiral, don't re-list it.** One or two sentences on what the rounds kept circling (e.g. "each round added a link to the resume-safety chain and the next found a gap in that link"). The per-round detail is already in `$HISTORY`.
+- **Recommend, don't decide.** Typically: merge as-is if the remaining findings are acceptable, split the PR, or hand-review the last fixes. Do not mark ready, do not re-run the loop, and do not remove the `review` label.
+
+Re-labelling after this exit *will* immediately re-exhaust the budget (the count is PR-resident by design). That is intentional: the next loop should start only after a human has changed something — split the PR, or reset the counter deliberately by editing the `pr-review-loop:rounds` marker on the newest summary comment and deleting `$PR_ROOT/rounds-total`.
 
 ### Mark ready for review (CLEAN exits only)
 
@@ -554,7 +596,7 @@ if [ "$(gh pr view "$PR_NUMBER" --json isDraft -q .isDraft)" = "true" ]; then
 fi
 ```
 
-Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop so CI doesn't run on every review-loop push, then defer the single CI run to `ready_for_review`. Marking ready here fires that end-of-cycle CI. On repos that don't use draft-first the PR isn't a draft, so this is a no-op. **Never mark ready on a non-CLEAN exit** (`NEEDS_HUMAN_REVIEW` / `TIMED_OUT` / `MAX_ITERATIONS_REACHED` / `CODEX_DEGRADED`) — an unconverged PR must stay a draft and out of CI.
+Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop so CI doesn't run on every review-loop push, then defer the single CI run to `ready_for_review`. Marking ready here fires that end-of-cycle CI. On repos that don't use draft-first the PR isn't a draft, so this is a no-op. **Never mark ready on a non-CLEAN exit** (`NEEDS_HUMAN_REVIEW` / `FIX_BUDGET_EXHAUSTED` / `TIMED_OUT` / `MAX_ITERATIONS_REACHED` / `CODEX_DEGRADED`) — an unconverged PR must stay a draft and out of CI.
 
 ### Remove the in-flight marker
 
