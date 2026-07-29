@@ -105,9 +105,10 @@ drops it when GitHub's REST API degrades. Write the body to a file and pass
 cat > "$RUN_DIR/summary.md" <<'EOF'
 CLAUDE: Review Loop Complete
 <!-- pr-review-loop:summary -->
+<!-- pr-review-loop:rounds {PR_ROUNDS_TOTAL} -->
 
 ## Summary
-- Iterations: {N} ({M} Codex rounds + {N-M} Claude fix rounds)
+- Iterations: {N} this run ({M} Codex rounds + {N-M} Claude fix rounds); {PR_ROUNDS_TOTAL} for this PR across all runs
 - Final round: {CODEX_REVIEW_CLEAN | CODEX_REVIEW_WITH_ISSUES | CLAUDE_FIX | TIMEOUT}
 - Total issues found: {X}
 - Issues resolved: {Y}
@@ -115,7 +116,7 @@ CLAUDE: Review Loop Complete
 - Duration: {minutes}m
 
 ## Status
-{CLEAN | NEEDS_HUMAN_REVIEW | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
+{CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
 
 Unresolved IMPORTANT pushbacks do not block CLEAN — see individual round comments for reasoning.
 

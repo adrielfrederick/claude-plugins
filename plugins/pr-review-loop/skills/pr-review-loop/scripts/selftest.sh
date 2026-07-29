@@ -387,6 +387,68 @@ else
   echo "  (skip: jq not installed — history-selector test needs jq)"
 fi
 
+echo "== history-io.sh rounds (per-PR fix budget) =="
+# ITERATION resets every run, so MAX_ITERATIONS bounds a RUN and not a PR —
+# f1-predictions#623 spent 13 rounds across two runs without either reaching 10.
+# This counter is what survives a re-label, so UNDERCOUNTING silently hands back
+# budget the PR has already spent. Every case below is a way that could happen.
+ROUNDS_MARKER='<!-- pr-review-loop:rounds 7 -->'
+printf '13\n'    > "$WORK/rounds-file.txt"
+printf 'garbage\n' > "$WORK/rounds-corrupt.txt"
+: > "$WORK/rounds-empty.txt"
+check "rounds-parse reads the marker" \
+  '[ "$(printf "%s" "$ROUNDS_MARKER" | bash "$HIO" rounds-parse)" = "7" ]'
+check "rounds-parse is empty with no marker" \
+  '[ -z "$(printf "no marker here" | bash "$HIO" rounds-parse)" ]'
+# Fresh container: local file gone, the PR-resident marker is the only source.
+check "marker alone survives a lost local file" \
+  '[ "$(printf "%s" "$ROUNDS_MARKER" | bash "$HIO" rounds-total "$WORK/nonexistent")" = "7" ]'
+# Deleted or hand-edited summary comment: the local file is the only source.
+check "local file alone survives a lost marker" \
+  '[ "$(printf "no marker" | bash "$HIO" rounds-total "$WORK/rounds-file.txt")" = "13" ]'
+# Max, not "prefer one" — either source can lag, and undercounting is the bug.
+check "max wins when the file is ahead" \
+  '[ "$(printf "%s" "$ROUNDS_MARKER" | bash "$HIO" rounds-total "$WORK/rounds-file.txt")" = "13" ]'
+check "max wins when the marker is ahead" \
+  '[ "$(printf "<!-- pr-review-loop:rounds 20 -->" | bash "$HIO" rounds-total "$WORK/rounds-file.txt")" = "20" ]'
+check "no source at all is 0, not empty" \
+  '[ "$(printf "nothing" | bash "$HIO" rounds-total "$WORK/nonexistent")" = "0" ]'
+# A half-written counter from a killed run must read as 0 rather than abort the
+# loop — the PR-resident marker still carries the real total in that case.
+check "a corrupt counter file degrades to 0" \
+  '[ "$(printf "nothing" | bash "$HIO" rounds-total "$WORK/rounds-corrupt.txt")" = "0" ]'
+check "an empty counter file degrades to 0" \
+  '[ "$(printf "nothing" | bash "$HIO" rounds-total "$WORK/rounds-empty.txt")" = "0" ]'
+# Phase 0 pipes the fetched comment body in; that fetch can legitimately be empty.
+check "rounds-total works with no stdin" \
+  '[ "$(bash "$HIO" rounds-total "$WORK/rounds-file.txt" < /dev/null)" = "13" ]'
+# The rounds marker must not cross-match the in-flight marker: both are
+# `pr-review-loop:` HTML comments, and the running marker's trailing epoch is a
+# long digit run that a loose pattern would happily read as a round count.
+check "the running marker is not read as a rounds count" \
+  '[ "$(printf "%s" "$MARKER" | bash "$HIO" rounds-total "$WORK/nonexistent")" = "0" ]'
+check "a rounds marker is not read as a host" \
+  '[ -z "$(printf "%s" "$ROUNDS_MARKER" | bash "$HIO" marker-host)" ]'
+# Both markers coexist on a real PR; each must find only its own.
+BOTH="$ROUNDS_MARKER"$'\n''<!-- pr-review-loop:running runnerbox 1783400000 -->'
+check "rounds parses alongside a running marker" \
+  '[ "$(printf "%s" "$BOTH" | bash "$HIO" rounds-parse)" = "7" ]'
+check "host parses alongside a rounds marker" \
+  '[ "$(printf "%s" "$BOTH" | bash "$HIO" marker-host)" = "runnerbox" ]'
+# The wrap-up template puts the rounds marker in the same comment as the history
+# block, so extraction and the counter must not interfere with each other.
+{
+  printf '%s\n' "CLAUDE: Automated Review Summary" "<!-- pr-review-loop:summary -->" "$ROUNDS_MARKER" ""
+  printf '%s\n' "<!-- pr-review-loop:history" "HIST-WITH-ROUNDS" "-->"
+} > "$WORK/comment-rounds.txt"
+bash "$HIO" extract < "$WORK/comment-rounds.txt" > "$WORK/hist-rounds.txt"
+check "extract still works with a rounds marker present" \
+  'grep -qx "HIST-WITH-ROUNDS" "$WORK/hist-rounds.txt"'
+check "extract drops the rounds marker itself" \
+  '! grep -q "pr-review-loop:rounds" "$WORK/hist-rounds.txt"'
+check "rounds reads out of a full wrap-up comment" \
+  '[ "$(bash "$HIO" rounds-total "$WORK/nonexistent" < "$WORK/comment-rounds.txt")" = "7" ]'
+
 echo "== refresh-packet.sh (fixture repo + fake gh) =="
 REFRESH="$DIR/refresh-packet.sh"
 FR="$WORK/fixture-repo"
