@@ -482,7 +482,11 @@ check "refresh: stale split removed on re-run" '[ ! -f "$PK/files/stale.patch" ]
 # Dot-path-only PR: every changed file lives under a dot-directory, so every
 # per-file split name begins with a dot. A plain `ls` omits dotfiles, which left
 # the manifest EMPTY → agents saw "0 files to review" → a vacuous "clean" review.
-# `ls -A` must include them. (Live repro: a .github/workflows/*.yml-only PR.)
+# (Live repro: a .github/workflows/*.yml-only PR.) This is the degenerate case —
+# the manifest goes fully empty; the MIXED case, where a dot-path file hides
+# among normal ones and only the count looks off, is covered in "path forms"
+# below. awk now emits the manifest directly, so neither `ls` nor `ls -A` is in
+# the path at all, but both cases stay pinned.
 FRD="$WORK/fixture-dotonly"
 git init -q -b main "$FRD" 2>/dev/null || { git init -q "$FRD"; git -C "$FRD" checkout -qb main; }
 git -C "$FRD" config user.email t@t; git -C "$FRD" config user.name t
@@ -530,6 +534,89 @@ check "refresh: unresolvable base dies"    '! PATH="$BIN:$PATH" FAKE_BASE=main b
 git -C "$FR" branch -q main HEAD
 check "refresh: empty diff dies"           '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main 2>/dev/null'
 check "refresh: not-a-repo dies"           '! PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$WORK" --packet "$PK" --pr 1 --base main 2>/dev/null'
+
+echo "== refresh-packet.sh: path forms (every shape git emits) =="
+# The MIXED-diff sibling of the dot-only case above, and the reason `ls -A`
+# alone was not enough: a 2-file PR (.github/workflows/ci.yml + pyproject.toml)
+# reported files=1: the split WAS written, the manifest just omitted it, so
+# agents told to read manifest.txt for the file list never saw the PR's main
+# file. One fixture covers every header shape, because each resolves by a
+# different route — ---/+++ lines, `rename to`, or the `diff --git` header.
+FR3="$WORK/fixture-paths"
+git init -q -b main "$FR3" 2>/dev/null || { git init -q "$FR3"; git -C "$FR3" checkout -qb main; }
+git -C "$FR3" config user.email t@t; git -C "$FR3" config user.name t
+mkdir -p "$FR3/.github/workflows" "$FR3/sub dir" "$FR3/a" "$FR3/a__b"
+printf 'base\n' > "$FR3/.github/workflows/ci.yml"
+printf 'base\n' > "$FR3/pyproject.toml"
+printf 'base\n' > "$FR3/sub dir/with space.txt"
+printf 'base\n' > "$FR3/unicode-caf$(printf '\303\251').txt"
+printf 'base\n' > "$FR3/old-name.txt"
+printf 'base\n' > "$FR3/mode-only.sh"
+printf 'base\n' > "$FR3/to-delete.txt"
+printf 'base\n' > "$FR3/a/b__c.py"        # these two flatten to the SAME name
+printf 'base\n' > "$FR3/a__b/c.py"
+printf '\211PNG\000\001bin\000' > "$FR3/logo.png"
+git -C "$FR3" add -A; git -C "$FR3" commit -qm base
+git -C "$FR3" checkout -qb feature
+printf 'change\n' >> "$FR3/.github/workflows/ci.yml"       # dot-directory (the live bug)
+printf 'change\n' >> "$FR3/pyproject.toml"
+printf 'change\n' >> "$FR3/sub dir/with space.txt"         # space → old `$4` split gave "dir"
+printf 'change\n' >> "$FR3/unicode-caf$(printf '\303\251').txt"  # C-quoted header
+printf 'change\n' >> "$FR3/a/b__c.py"
+printf 'change\n' >> "$FR3/a__b/c.py"
+printf 'new\n'    >  "$FR3/.hidden-root-file"              # dot-file at repo root
+git -C "$FR3" mv old-name.txt renamed-name.txt             # halves differ → needs `rename to`
+chmod +x "$FR3/mode-only.sh"                               # no ---/+++ lines at all
+printf '\211PNG\000\002new\000' > "$FR3/logo.png"          # binary: no ---/+++ either
+rm "$FR3/to-delete.txt"                                    # +++ is /dev/null → falls back to ---
+git -C "$FR3" add -A; git -C "$FR3" commit -qm change
+PK3="$WORK/packet-paths"; mkdir -p "$PK3"
+out3="$(PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FR3" --packet "$PK3" --pr 1 --base main)"
+HDRS3="$(grep -c '^diff --git ' "$PK3/diff.patch")"
+
+# Split exists AND is listed. Both halves matter: the live bug wrote the split
+# but omitted the manifest entry, and agents only ever read the manifest.
+inmanifest() { grep -qxF "$1" "$PK3/manifest.txt" && [ -f "$PK3/files/$1" ]; }
+check "paths: dot-directory split + manifest entry" 'inmanifest ".github__workflows__ci.yml.patch"'
+check "paths: dot-file at repo root"                'inmanifest ".hidden-root-file.patch"'
+check "paths: plain sibling still works"            'inmanifest "pyproject.toml.patch"'
+check "paths: space keeps the real name"            'inmanifest "sub dir__with space.txt.patch"'
+check "paths: rename uses the NEW name"             'inmanifest "renamed-name.txt.patch"'
+check "paths: rename does not use the old name"     '! [ -f "$PK3/files/old-name.txt.patch" ]'
+check "paths: mode-only change (no ---/+++)"        'inmanifest "mode-only.sh.patch"'
+check "paths: binary file (no ---/+++)"             'inmanifest "logo.png.patch"'
+check "paths: deletion (+++ is /dev/null)"          'inmanifest "to-delete.txt.patch"'
+# Matched by pattern, not by the exact escape: the filesystem decides whether é
+# lands as NFC (\303\251) or NFD (e\314\201), and that is not what is under test.
+# What IS under test is that the C-quote WRAPPER is stripped — the old code kept
+# it and produced the name "b__unicode-caf\303\251.txt", leading quote and all.
+qname="$(grep -m1 '^unicode-caf.*\.txt\.patch$' "$PK3/manifest.txt")"
+check "paths: C-quoted non-ASCII is unwrapped"      '[ -n "$qname" ] && [ -f "$PK3/files/$qname" ]'
+check "paths: C-quote wrapper not left in the name" '! grep -q "\"" "$PK3/manifest.txt"'
+# a/b__c.py and a__b/c.py flatten identically; merging them would hide one file.
+check "paths: flatten collision is de-duped"        'inmanifest "a__b__c.py.patch" && inmanifest "a__b__c.py~2.patch"'
+
+# The counts must agree, and the reported number must be the real one — the bug
+# under-reported files=1 for a 2-file diff without raising anything.
+check "paths: reported files= equals header count" 'printf "%s" "$out3" | grep -q "files=$HDRS3"'
+check "paths: manifest count equals header count"  '[ "$(wc -l < "$PK3/manifest.txt" | tr -d " ")" -eq "$HDRS3" ]'
+check "paths: files/ count equals header count"    '[ "$(find "$PK3/files" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d " ")" -eq "$HDRS3" ]'
+# Splits must partition diff.patch exactly: no line lost, misfiled, or doubled.
+( cd "$PK3/files" && while IFS= read -r n; do cat "$n"; done < ../manifest.txt ) > "$WORK/rejoined.patch"
+check "paths: splits rejoin to diff.patch byte-for-byte" 'cmp -s "$PK3/diff.patch" "$WORK/rejoined.patch"'
+
+# gh emitting something that is not a patch (an auth page, an error blob) used
+# to yield a non-empty diff.patch, an EMPTY manifest and a cheerful files=0 —
+# the same silent-vacuum class as the dot-path bug. It must die instead.
+GB="$WORK/bin-garbage"; mkdir -p "$GB"
+cat > "$GB/gh" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = "pr" ] && [ "$2" = "diff" ] || exit 1
+printf 'not a patch at all\njust some prose\n'
+FAKE
+chmod +x "$GB/gh"
+PK4="$WORK/packet-garbage"; mkdir -p "$PK4"
+check "paths: non-patch gh output dies" '! PATH="$GB:$PATH" bash "$REFRESH" --repo "$FR3" --packet "$PK4" --pr 1 --base main 2>/dev/null'
 
 echo "== gh-io.sh (fake gh: REST/GraphQL health is switchable) =="
 GHIO="$DIR/gh-io.sh"
