@@ -673,6 +673,15 @@ if [ "${1:-}" = "graphql" ]; then
       jq --argjson n "$NEXT" --arg b "$B" '. + [{databaseId:$n, id:"NODE_\($n)", body:$b}]' \
         "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE"
       emit "$(jq -nc --argjson n "$NEXT" '{data:{addComment:{commentEdge:{node:{databaseId:$n,id:"NODE_\($n)"}}}}}')" ;;
+    *updateIssueComment*)
+      PREFIX="id="; NID="$(argval "$@")"
+      B="$(body_arg "$@")"
+      jq -e --arg i "$NID" 'any(.[]; .id == $i)' "$STORE" >/dev/null \
+        || { echo "Could not resolve to a node with the global id of '$NID'" >&2; exit 1; }
+      jq --arg i "$NID" --arg b "$B" 'map(if .id == $i then .body = $b else . end)' \
+        "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE"
+      DBID="$(jq -r --arg i "$NID" '.[] | select(.id == $i) | .databaseId' "$STORE")"
+      emit "$(jq -nc --argjson d "$DBID" '{data:{updateIssueComment:{issueComment:{databaseId:$d}}}}')" ;;
     *deleteIssueComment*)
       PREFIX="id="; NID="$(argval "$@")"
       jq -e --arg i "$NID" 'any(.[]; .id == $i)' "$STORE" >/dev/null \
@@ -711,6 +720,14 @@ case "$METHOD/$PATH_ARG" in
     jq --argjson n "$NEXT" --arg b "$B" '. + [{databaseId:$n, id:"NODE_\($n)", body:$b}]' \
       "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE"
     emit "$(jq -nc --argjson n "$NEXT" '{id:$n, node_id:"NODE_\($n)"}')" ;;
+  PATCH/*/issues/comments/*)
+    CID="${PATH_ARG##*/}"
+    B="$(body_arg "$@")"; B="${B:-$(cat "${FAKE_BODY:-/dev/null}")}"
+    jq -e --argjson c "$CID" 'any(.[]; .databaseId == $c)' "$STORE" >/dev/null \
+      || { echo "gh: HTTP 404: Not Found" >&2; exit 1; }
+    jq --argjson c "$CID" --arg b "$B" 'map(if .databaseId == $c then .body = $b else . end)' \
+      "$STORE" > "$STORE.t" && mv "$STORE.t" "$STORE"
+    emit "$(jq -nc --argjson c "$CID" '{id:$c, node_id:"NODE_\($c)"}')" ;;
   DELETE/*/issues/comments/*)
     CID="${PATH_ARG##*/}"
     jq -e --argjson c "$CID" 'any(.[]; .databaseId == $c)' "$STORE" >/dev/null \
@@ -775,6 +792,28 @@ check "gh-io: delete treats 404 as success" \
   'PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" delete-comment --repo o/r --cid 999 2>/dev/null'
 check "gh-io: delete without a node id fails loudly when REST is down" \
   '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-down bash "$GHIO" delete-comment --repo o/r --cid 999 2>/dev/null'
+
+# edit-comment: updates body in place, reads --id-file, falls back to GraphQL.
+reset_store
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
+EDITF="$WORK/edit-body.txt"; printf 'Updated progress: round 2 done\n' > "$EDITF"; FAKE_BODY="$EDITF"
+PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" edit-comment --repo o/r --id-file "$IDF" --body-file "$EDITF" >/dev/null 2>&1
+check "gh-io: edit updates comment body" \
+  'jq -e ".[0].body == \"Updated progress: round 2 done\"" "$GS" >/dev/null'
+# REST-down: falls back to GraphQL. Use a distinct body so a stale REST-written
+# value can't masquerade as proof the GraphQL path actually ran.
+EDITF2="$WORK/edit-body-2.txt"; printf 'Updated progress: round 3 done (via graphql)\n' > "$EDITF2"; FAKE_BODY="$EDITF2"
+check "gh-io: edit falls back to GraphQL and exits 0" \
+  'PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-down bash "$GHIO" edit-comment --repo o/r --id-file "$IDF" --body-file "$EDITF2" >/dev/null 2>&1'
+check "gh-io: edit via GraphQL updates comment body" \
+  'jq -e ".[0].body == \"Updated progress: round 3 done (via graphql)\"" "$GS" >/dev/null'
+# All-down: fails.
+check "gh-io: edit fails when both APIs are down" \
+  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=all-down bash "$GHIO" edit-comment --repo o/r --id-file "$IDF" --body-file "$EDITF2" 2>/dev/null'
+# Empty body: dies.
+check "gh-io: edit rejects empty body" \
+  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" edit-comment --repo o/r --cid 101 --body-file /dev/null 2>/dev/null'
+FAKE_BODY="$BODYF"
 
 # newest-comment-id: the monotonic baseline reconcile scopes its check with.
 reset_store

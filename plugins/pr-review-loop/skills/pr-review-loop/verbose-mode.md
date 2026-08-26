@@ -91,7 +91,7 @@ gh pr comment $PR_NUMBER --body "CLAUDE: Response to Review Round {N}
 - Build: PASS/FAIL
 - Tests: PASS/FAIL (X passed, Y failed)
 
-Pushed fixup commit: {SHORT_SHA}"
+Pushed commit: {SHORT_SHA} {SUBJECT_LINE}"
 ```
 
 ## Phase 5 Verbose — final summary

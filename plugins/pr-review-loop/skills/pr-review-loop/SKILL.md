@@ -137,7 +137,7 @@ If either is missing, stop and tell the user with the install link from the erro
 
    The PR is the durable copy; the local file is just the working copy. This makes pushback history a property of the PR, not the machine that happened to run the last loop.
 
-9. **In-flight guard — check (don't race another loop).** The runner's workflow `concurrency` serializes runner runs, but nothing stops a laptop loop racing a `review`-label runner loop on the same PR — both would push fixup commits to the same branch. Here, only *check* for a live loop on another host and abort if found. `marker-blocks` exits 0 when a fresh marker from a different host holds the PR (its 75-min freshness window — just above the whole-loop `TIMEOUT_SECONDS` — treats anything older as a dead run):
+9. **In-flight guard — check (don't race another loop).** The runner's workflow `concurrency` serializes runner runs, but nothing stops a laptop loop racing a `review`-label runner loop on the same PR — both would push commits to the same branch. Here, only *check* for a live loop on another host and abort if found. `marker-blocks` exits 0 when a fresh marker from a different host holds the PR (its 75-min freshness window — just above the whole-loop `TIMEOUT_SECONDS` — treats anything older as a dead run):
 
    ```bash
    HOST="$(hostname)"; NOW="$(date +%s)"
@@ -151,7 +151,7 @@ If either is missing, stop and tell the user with the install link from the erro
      existing=""
    fi
    if [ -n "$existing" ] && printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-blocks "$HOST" "$NOW"; then
-     echo "Another pr-review-loop is running on PR #$PR_NUMBER from another host. Aborting to avoid racing fixup pushes. If that run is dead, delete its 'pr-review-loop:running' comment and retry."
+     echo "Another pr-review-loop is running on PR #$PR_NUMBER from another host. Aborting to avoid racing pushes. If that run is dead, delete its 'pr-review-loop:running' comment and retry."
      exit 1
    fi
    ```
@@ -176,7 +176,7 @@ Pre-extract everything agents need into `$PACKET`. Without this, each of the 3�
 
 After copying `$PACKET/CLAUDE.md`, read it and remove sections a code reviewer doesn't need (deployment, scheduling, planning/execution contracts, communication-style rules), keeping Project/Environment/Commands/Testing/Conventions/style limits. If a section's relevance is ambiguous, keep it — the goal is dropping obvious bulk, not aggressive pruning.
 
-**Diff artifacts — a script you re-run every round.** Claude pushes fixup commits between rounds, so the diff changes; `refresh-packet.sh` regenerates `diff.patch`, the per-file `files/` splits, `manifest.txt`, `diff-wide.patch`, and `changed-files.txt`, and owns **base-ref resolution** (on a laptop the bare base branch exists locally; in a CI/runner head-only checkout it must resolve `origin/<base>` or fetch — it hard-fails rather than silently producing an empty packet). Call it here, and again at the top of every round (Phase 1 Step 0) — never hand-generate these artifacts:
+**Diff artifacts — a script you re-run every round.** Claude pushes fix commits between rounds, so the diff changes; `refresh-packet.sh` regenerates `diff.patch`, the per-file `files/` splits, `manifest.txt`, `diff-wide.patch`, and `changed-files.txt`, and owns **base-ref resolution** (on a laptop the bare base branch exists locally; in a CI/runner head-only checkout it must resolve `origin/<base>` or fetch — it hard-fails rather than silently producing an empty packet). Call it here, and again at the top of every round (Phase 1 Step 0) — never hand-generate these artifacts:
 
 ```bash
 "$SKILL_DIR/scripts/refresh-packet.sh" \
@@ -209,20 +209,37 @@ printf '🔒 pr-review-loop running on `%s` (auto-removed at loop end) <!-- pr-r
 
 `post-comment` writes `"<databaseId> <nodeId>"` to `--id-file` as part of the same operation that posts, so there is no window where a marker exists on the PR that nothing knows the id of. Phase 5 reads that file back. If this call **fails** (both APIs down), it exits non-zero and no marker was posted — stop and tell the user GitHub is unreachable; do not proceed to review with no lock.
 
+**Post the progress comment now** — a lightweight status table edited in place each round so anyone watching the PR can follow the loop's progress without waiting for the final summary. It carries a `<!-- pr-review-loop:progress -->` marker (deliberately NOT `pr-review-loop:summary`, so it can never satisfy reconcile). Phase 5 deletes it once the summary supersedes it.
+
+```bash
+{
+  echo "### Review in progress"
+  echo "<!-- pr-review-loop:progress -->"
+  echo
+  echo "| Round | Agents | Findings | Fixed | Pushed back | Status |"
+  echo "|:---:|---|:---:|:---:|:---:|---|"
+  echo "| 0 | — | — | — | — | ⏳ reviewing… |"
+} > "$RUN_DIR/progress.md"
+"$GH_IO" post-comment --repo "$OWNER_REPO" --pr "$PR_NUMBER" \
+  --body-file "$RUN_DIR/progress.md" --id-file "$PR_ROOT/progress-cid"
+```
+
+If posting the progress comment fails, log a warning and continue — progress visibility is nice-to-have, not load-bearing. Set `PROGRESS_POSTED=1` on success, `0` on failure; every later edit checks this before calling `gh-io.sh edit-comment`.
+
 **From this moment, every exit routes through Phase 5** — not just the enumerated statuses, but *any* fatal error in Phases 1–4: a failed `refresh-packet.sh` or `build-prompts.sh`, an unfixable agent-crash environment, a rejected push, a gh outage. If you must stop for any reason, first run Phase 5's marker-removal step (post the wrap-up too if there's anything to report). Never end the turn with the marker still posted — an orphaned marker false-blocks every other host for 75 minutes.
 
 ## Phase 1: Codex review
 
 ### Step 0: Start the round
 
-Set up this round's directory and refresh the diff (Claude pushed fixups last round, so the diff has moved):
+Set up this round's directory and refresh the diff (Claude pushed fixes last round, so the diff has moved):
 
 ```bash
 ROUND_DIR="$RUN_DIR/round-$ITERATION"   # ITERATION starts at 0; incremented in Phase 4
 mkdir -p "$ROUND_DIR"
 ROUND_BASE_SHA="$(git rev-parse HEAD)"   # HEAD *before* this round's fixes — used to compute the delta for a later scoped verify
 # Refresh the packet so diff.patch / files/ / manifest.txt / diff-wide.patch /
-# changed-files.txt reflect the current PR head (Claude pushed fixups last round).
+# changed-files.txt reflect the current PR head (Claude pushed fixes last round).
 "$SKILL_DIR/scripts/refresh-packet.sh" \
   --repo "$(git rev-parse --show-toplevel)" \
   --packet "$PACKET" \
@@ -369,16 +386,51 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
 **Verbose mode**: follow `verbose-mode.md` to post the review to the PR before Phase 3.
 
+4. **Update the progress comment** (both modes). Rebuild `$RUN_DIR/progress.md` with the current round's row showing the finding counts and "⏳ fixing…" status, then edit in place:
+
+   ```bash
+   # Rebuild the full table from conversation state (all rounds so far).
+   # Each prior round's row is already known; this round adds a new one.
+   # The current round's row:
+   #   | {N} | {agent list} | {total findings} | — | — | ⏳ fixing… |
+   # Prior rounds show their final resolved state:
+   #   | {N} | {agent list} | {findings} | {fixed} | {pushed back} | ✅ |
+   ```
+
+   ```bash
+   if [ "$PROGRESS_POSTED" = "1" ]; then
+     # ... write the rebuilt table to "$RUN_DIR/progress.md" ...
+     "$GH_IO" edit-comment --repo "$OWNER_REPO" \
+       --id-file "$PR_ROOT/progress-cid" --body-file "$RUN_DIR/progress.md" \
+       || echo "Warning: could not update progress comment (non-fatal)." >&2
+   fi
+   ```
+
 ## Phase 3: Claude responds
 
 1. For each finding: **Agree** (fix it), **Partially agree** (modified fix), or **Disagree** (pushback with written reasoning). A pushback must **cite the evidence that defeats the finding** — the specific code line, existing guard, type/constant, or project convention that makes it wrong or already-handled — not just assert judgment. If you can't point to concrete evidence, either fix it or ask, don't hand-wave. (These citations become the "All Prior Pushbacks" entries reviewers must clear a higher bar to re-raise, so they need to actually hold up.)
 2. After each file edit: run project-appropriate format+lint with auto-fix on the changed file (e.g. `ruff format <file> && ruff check <file> --fix`).
-3. Stage, fixup-commit, and push:
+3. Stage, commit with a descriptive message, and push:
    ```bash
-   FIXUP_TARGET=$(git log --oneline -1 --format="%H")
    git add <changed files>
-   git commit --fixup=$FIXUP_TARGET -m "fixup! Address CODEX review round {N}"
+   git commit -m "<subject line>" -m "<body>"
    git push
+   ```
+
+   **Subject line** — a conventional-commit-style summary of what changed, not which round triggered it. Examples:
+   - `fix: fail-close on unbridged pit-lane penalties in C14 writer`
+   - `test: add wiring test for strict exclusion in main()`
+   - `fix: guard against NaN in lap-delta interpolation`
+
+   Keep it under 72 characters. Do NOT use `--fixup` — the cascading `fixup! fixup! fixup!` prefixes are unreadable and add no useful context.
+
+   **Body** — list the 2–3 Codex findings this commit addresses (one line each: agent name, file:line, one-sentence description). This gives anyone watching the PR branch a clear picture of what each commit responds to, since the Codex reviews themselves are not visible on the PR in quiet mode. Example:
+   ```
+   Addresses review round 3 findings:
+   - failure-pattern-analyst: fit_start_residuals.py:1464 — artifact writer
+     calls pit_lane_exclusions() without strict=True
+   - test-analyzer: fit_start_spread.py:725 — no wiring test proving main()
+     passes strict=True
    ```
 
    **You cannot push changes to `.github/workflows/*` when running in CI.** The
@@ -429,6 +481,17 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    summary was ever posted.
 5. **Verbose mode**: post `CLAUDE:` response comment per `verbose-mode.md`. **Quiet mode**: report locally.
 6. **Update `$HISTORY`**: append this round's round-summary + resolved items to `## Recent Rounds` (trim to last 2); append each pushback to `## All Prior Pushbacks` (grows forever).
+6a. **Update the progress comment** (both modes). Rebuild `$RUN_DIR/progress.md` — this round's row now shows its final state (`{fixed}`, `{pushed_back}`, `✅`). If the loop will continue (Phase 4 decides), append a placeholder row for the next round (`| {N+1} | — | — | — | — | ⏳ reviewing… |`):
+
+   ```bash
+   if [ "$PROGRESS_POSTED" = "1" ]; then
+     # ... write the rebuilt table to "$RUN_DIR/progress.md" ...
+     "$GH_IO" edit-comment --repo "$OWNER_REPO" \
+       --id-file "$PR_ROOT/progress-cid" --body-file "$RUN_DIR/progress.md" \
+       || echo "Warning: could not update progress comment (non-fatal)." >&2
+   fi
+   ```
+
 7. **Classify this round's change** (Phase 4 uses it to decide whether the next round can be a cheaper scoped verify). Look at the files you changed this round and set `LAST_FIX_CLASS`:
 
    ```bash
@@ -552,7 +615,7 @@ CLAUDE: Automated Review Summary
 - Lint / Build / Tests: PASS/FAIL/TIMEOUT (X passed, Y failed; name any command that hit its bound and the bound it hit)
 
 ## Commits
-{list of fixup SHAs with one-line descriptions}
+{list of commit SHAs with their subject lines}
 
 <!-- pr-review-loop:history
 {verbatim contents of $HISTORY}
@@ -598,6 +661,18 @@ fi
 
 Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop so CI doesn't run on every review-loop push, then defer the single CI run to `ready_for_review`. Marking ready here fires that end-of-cycle CI. On repos that don't use draft-first the PR isn't a draft, so this is a no-op. **Never mark ready on a non-CLEAN exit** (`NEEDS_HUMAN_REVIEW` / `FIX_BUDGET_EXHAUSTED` / `TIMED_OUT` / `MAX_ITERATIONS_REACHED` / `CODEX_DEGRADED`) — an unconverged PR must stay a draft and out of CI.
 
+### Remove the progress comment
+
+Delete the progress comment posted in Phase 0.5 — the summary supersedes it, and leaving both clutters the PR. Do this on **every** exit, after the summary is posted (so there's never a gap where neither is visible). Best-effort: a failure to delete is cosmetic, not structural.
+
+```bash
+GH_IO="$SKILL_DIR/scripts/gh-io.sh"   # re-set: fresh shell
+if [ -f "$PR_ROOT/progress-cid" ]; then
+  "$GH_IO" delete-comment --repo "$OWNER_REPO" --id-file "$PR_ROOT/progress-cid" \
+    || echo "Warning: could not remove the progress comment — it's harmless but cosmetic." >&2
+fi
+```
+
 ### Remove the in-flight marker
 
 Delete the `pr-review-loop:running` marker posted at the end of Phase 0.5 (do this on **every** exit, clean or not, so a finished run never blocks the next one):
@@ -628,7 +703,7 @@ fi
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
 - `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
 - `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
-- `scripts/gh-io.sh` — every GitHub **write** the loop makes (marker post, marker delete, summary post), with retry + a REST→GraphQL fallback; also the `reconcile` the CI workflow runs to prove the loop finished (Phase 0.5, Phase 5)
+- `scripts/gh-io.sh` — every GitHub **write** the loop makes (marker post, marker delete, summary post, progress comment post/edit/delete), with retry + a REST→GraphQL fallback; also the `reconcile` the CI workflow runs to prove the loop finished (Phase 0.5, Phase 5)
 - `scripts/selftest.sh` — runnable coverage for all of the above (no repo CI; run `bash scripts/selftest.sh`)
 - `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, `_scoped.txt` (scoped-verify addendum), and one persona file per agent
 - `agent-prompts.md` — documents the fragments and assembly order (no longer hand-assembled)

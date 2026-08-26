@@ -22,6 +22,10 @@
 #         later fresh shell (Phase 5) can delete the comment without re-reading
 #         it — the node id is captured HERE because resolving it later needs the
 #         very REST endpoint that goes down during an incident.
+#   gh-io.sh edit-comment      --repo O/R --cid ID [--node NODE] [--id-file F] --body-file F
+#       → updates an existing comment's body in place. --id-file is read (not
+#         written) for the "<databaseId> <nodeId>" pair. Retry + REST→GraphQL
+#         fallback, same as post/delete.
 #   gh-io.sh delete-comment    --repo O/R --cid ID [--node NODE] [--id-file F]
 #       → exit 0 on delete or already-gone (404). --id-file is removed on success.
 #   gh-io.sh newest-comment-id --repo O/R --pr N
@@ -141,6 +145,27 @@ del_graphql() {
 
 del_once() { del_rest || del_graphql; }
 
+# ── edit-comment ───────────────────────────────────────────────────────────
+edit_rest() {
+  local out
+  out="$(gh api -X PATCH "repos/$REPO/issues/comments/$CID" \
+    -F "body=@$BODY_FILE" --jq '"\(.id) \(.node_id)"' 2>&1)" || { log "REST edit failed: $out"; return 1; }
+  is_num "${out%% *}" || { log "REST edit returned a non-numeric id (degraded API?): ${out:0:120}"; return 1; }
+}
+
+edit_graphql() {
+  local out
+  [ -n "${NODE:-}" ] || { log "no node id known for comment $CID — cannot use the GraphQL fallback"; return 1; }
+  out="$(gh api graphql \
+    -f query='mutation($id:ID!,$body:String!){updateIssueComment(input:{id:$id,body:$body}){issueComment{databaseId}}}' \
+    -f id="$NODE" -F "body=@$BODY_FILE" \
+    --jq '.data.updateIssueComment.issueComment.databaseId' 2>&1)" \
+    || { log "GraphQL edit failed: $out"; return 1; }
+  is_num "$out" || { log "GraphQL edit returned a non-numeric id: ${out:0:120}"; return 1; }
+}
+
+edit_once() { edit_rest || edit_graphql; }
+
 # ── comment listing (reconcile) ─────────────────────────────────────────────
 # GraphQL FIRST here, inverting the order used by the write paths above: it
 # returns the newest 100 in one request (`last:100`), whereas the REST endpoint
@@ -207,6 +232,17 @@ case "$CMD" in
         || die "posted comment $POSTED but could not write --id-file $ID_FILE — delete the comment by hand"
     fi
     printf '%s\n' "$POSTED"
+    ;;
+
+  edit-comment)
+    [ -n "$REPO" ] || die "--repo is required"
+    if [ -z "$CID" ] && [ -n "$ID_FILE" ] && [ -f "$ID_FILE" ]; then
+      read -r CID NODE < "$ID_FILE" || true
+    fi
+    is_num "$CID" || die "--cid must be a number (got: ${CID:-empty})"
+    [ -s "$BODY_FILE" ] || die "--body-file is required and must be non-empty: ${BODY_FILE:-unset}"
+    split_repo
+    with_retry edit_once || die "could not edit comment $CID on $REPO via REST or GraphQL"
     ;;
 
   delete-comment)
@@ -286,6 +322,6 @@ case "$CMD" in
     ;;
 
   *)
-    die "usage: gh-io.sh {post-comment|delete-comment|newest-comment-id|reconcile} [flags] (see the header)"
+    die "usage: gh-io.sh {post-comment|edit-comment|delete-comment|newest-comment-id|reconcile} [flags] (see the header)"
     ;;
 esac
