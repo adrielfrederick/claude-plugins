@@ -34,7 +34,7 @@ After a plan is created:
 
      **Conditional 5th agent — Project Failure Patterns**: Resolve the repo root by walking up from the plan document's directory looking for a `.git` entry. If `<repo-root>/.claude/skills/extensions/failure-patterns.md` exists, launch a 5th Sonnet agent in the same parallel batch using the Dimension 5 rubric below. Pass the absolute path of the patterns file to the agent. If the file does not exist, do not launch this agent — the four standard dimension agents are sufficient.
 
-   - **Passes 3-5 (holistic review with Opus)**: Launch **1 reviewer agent** using the Agent tool with `model: "opus"`. This agent reviews the full plan against all dimensions holistically, with full context of all prior feedback and author responses. Its prompt includes:
+   - **Passes 3-5 (holistic review with Fable)**: Launch **1 reviewer agent** using the Agent tool with `model: "fable"`. This agent reviews the full plan against all dimensions holistically, with full context of all prior feedback and author responses. Its prompt includes:
      - The absolute path to the plan document
      - The absolute path to the review conversation document
      - The full review rubric (all 4 dimensions combined)
@@ -234,7 +234,7 @@ Severity and verdict semantics match the other reviewers in your cohort —
 see the common preamble.
 ```
 
-### Holistic Review (passes 3-5, Opus)
+### Holistic Review (passes 3-5, Fable)
 
 ```
 ## Your Review: Holistic
@@ -271,7 +271,8 @@ Use `Verdict: stop review` if the plan is good enough and further iteration woul
 
 ## Notes
 
-- Reviewer agents are launched via the **Agent tool** with `model: "sonnet"` (passes 1-2) or `model: "opus"` (passes 3+). No external CLI is needed.
+- Reviewer agents are launched via the **Agent tool** with `model: "sonnet"` (passes 1-2) or `model: "fable"` (passes 3+). No external CLI is needed.
+- `"fable"` is the Agent tool's alias for the current Claude Fable model (Claude Fable 5.1 at the time of writing), so the holistic pass tracks the newest Fable release without a change here. If the Agent tool on a host rejects `model: "fable"` (older Claude Code, or no Fable access), fall back to `model: "opus"` for that pass and say so in the review document.
 - For passes 1-2, all 4 dimension agents MUST be launched in a single message (parallel tool calls) to minimize wall-clock time.
 - Each agent invocation is independent — they don't share state beyond what's in the review document.
 - If an agent fails or times out, note the gap and continue with available feedback.
