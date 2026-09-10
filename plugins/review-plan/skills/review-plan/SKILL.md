@@ -39,7 +39,7 @@ After a plan is created:
 
    The warning is repeated at wrap-up (step 9). Proceed with the review regardless — the budget shapes the plan, it does not block it.
 
-2. **Create the review document** at the same path with a `-review` suffix (e.g., `docs/plans/auth-redesign-review.md`):
+2. **Create the review document** in a `reviews/` subdirectory beside the plan, with a `-review` suffix (e.g., `docs/plans/reviews/auth-redesign-review.md` for `docs/plans/auth-redesign.md`). Create the directory if it does not exist. Reviews are long and rarely read, and keeping them out of the plans directory keeps it browsable. If a review of this plan already exists at the legacy location beside the plan (`docs/plans/auth-redesign-review.md`), move it into `reviews/` first (`git mv` in a git repo), repoint any links to it, and continue that document rather than starting a new one. The review's `Plan:` header stays repo-root-relative, and any markdown link from the review to the plan is relative to `reviews/` (`../auth-redesign.md`).
 
    ```
    Plan: docs/plans/auth-redesign.md
@@ -404,6 +404,10 @@ Number new findings P{N}-H1, P{N}-H2, ... Use `Verdict: stop review` when every 
 - Reviewers write blocks to `$SCRATCH/pass-N/`, never to the review document. Only the orchestrator writes the review document, so the transcript is always in pass order and a block can never land after its response. `/tmp` is per-host and per-boot; the transcript in the repo is the durable record.
 - If an agent fails or times out, note the gap in the transcript and continue with the blocks you have. Never treat a missing block as `ready`.
 - The ledger is the single source of truth for review state. The transcript is the audit trail. A reviewer that wants the history reads the ledger first and the transcript only for the reasoning behind a specific row.
+
+## What changed in 0.5.0 (and why)
+
+The review document moved from beside the plan into a `reviews/` subdirectory (step 2). In one repo, 93 review transcripts sat interleaved with 106 plans in a single directory: nearly half the files and half the text in the folder a reader browses to find a plan, and cited by almost nothing outside the plan itself. A re-review of a plan whose review is still at the old location moves that file into `reviews/` instead of starting a second one.
 
 ## What changed in 0.4.0 (and why)
 

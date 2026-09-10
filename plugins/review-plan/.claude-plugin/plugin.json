@@ -1,7 +1,7 @@
 {
   "name": "review-plan",
   "description": "Facilitates an automated plan review loop using parallel Claude reviewer agents, iterating on feedback until the plan is approved.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "Adriel Frederick"
   },
