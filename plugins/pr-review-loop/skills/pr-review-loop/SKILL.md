@@ -449,7 +449,9 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    token that could rewrite CI would let reviewed code rewrite the pipeline that
    runs on the default branch. On a laptop run (a human's own credentials) the
    edit is fine — this restriction is CI-only.
-4. **In parallel with posting/reporting**, run full validation (lint check, build/typecheck, tests). Commands come from CLAUDE.md / project config. If validation fails, fix, amend, force-push with `--force-with-lease`.
+4. **In parallel with posting/reporting**, run **targeted validation** on this round's fix: the lint/format check, then the tests that cover the files changed this round. Commands come from CLAUDE.md / project config. **Targeted means:** every test file changed this round, plus every test file that imports a module changed this round (grep the test tree for the module path), plus any always-on smoke command the project names. Run the project's **full suite only** (a) on the final candidate — Phase 4's full-validation gate before a CLEAN exit — or (b) when this round's fix changed a shared production interface, default or config whose consumers a grep cannot enumerate, and say so in the round summary. If validation fails, fix, amend, force-push with `--force-with-lease`.
+
+   **Why targeted (0.14.0):** a full suite after every narrow fix was the largest single cost in long loops — one 2026-09 loop ran a project's full backend suite five times at ~11 minutes each inside a 110-minute review. The final full run catches what the targeted runs missed; the intermediate ones only repeat it.
 
    **Every validation command must be bounded, and its output must survive.** The
    agent-watchdog rationale in Phase 1 Step 4 applies here verbatim: `TIMEOUT_SECONDS`
@@ -523,6 +525,8 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - **This round was a scoped verify (`SCOPED_THIS=1`) and Codex returned no findings** — the tests/docs-only delta is verified. Codex independently reviewed the delta, so this is a real clean, not self-certification.
    - Last Codex review had 0 CRITICAL and every remaining IMPORTANT is either (a) in "All Prior Pushbacks" with Claude's rebuttal standing, or (b) Claude-declined-with-reasoning this round (**clean-on-pushback** — Claude is explicitly allowed to decline IMPORTANTs without a code change).
    - `CONSECUTIVE_CLEAN_ROUNDS >= 3` (3 rounds without any CRITICAL is strong convergence).
+
+   **Full-validation gate on CLEAN (0.14.0).** Before any CLEAN exit, run the project's full validation set once on the final head — lint, build/typecheck and the full test suite — bounded and logged exactly as Phase 3 Step 4 describes. Skip it only if the last full run already ran on this exact head SHA. A failure is not CLEAN: fix it in Phase 3 terms, commit, push, and continue — the next round is a scoped verify or a full batch per `LAST_FIX_CLASS` as usual. Record which head the full run covered; Phase 5's Validation section reports it.
 
    **Fix-induced findings get no special CLEAN** (changed in 0.7.0 — the old "fix-induced-only ⇒ CLEAN" bullet let just-pushed, never-reviewed fixes ship; that remains forbidden). When this round's findings only target code added since the *previous* review to fix prior findings (the tail-chasing signature), handle them like any other finding in Phase 3: fix, or decline with evidence. Declining them all with no code change routes through **clean-on-pushback** above — a legitimate CLEAN, the findings were answered. Fixing any of them routes through **Otherwise** below, and the normal `LAST_FIX_CLASS` gate decides whether the verification round is scoped (tests/docs fix) or full (prod fix). Either way, Codex reviews the final pushed state — never exit CLEAN with fixes no reviewer has seen.
 
@@ -612,7 +616,8 @@ CLAUDE: Automated Review Summary
 - `file:line` — {suggestion}
 
 ## Validation
-- Lint / Build / Tests: PASS/FAIL/TIMEOUT (X passed, Y failed; name any command that hit its bound and the bound it hit)
+- Rounds 0–N: targeted — lint plus the tests covering each round's changed files (name the test files or selectors run; name any round that ran the full suite and why)
+- Full suite once on {FINAL_HEAD_SHA}: PASS/FAIL/TIMEOUT (X passed, Y failed; name any command that hit its bound and the bound it hit)
 
 ## Commits
 {list of commit SHAs with their subject lines}

@@ -75,7 +75,7 @@ Then report: "Posted CODEX review round {N} with X critical, Y important, Z sugg
 
 ## Phase 3 Verbose — post Claude's response
 
-After fixes are committed and pushed, post a `CLAUDE:` summary comment. Run this in parallel with the validation suite:
+After fixes are committed and pushed, post a `CLAUDE:` summary comment. Run this in parallel with this round's targeted validation:
 
 ```bash
 gh pr comment $PR_NUMBER --body "CLAUDE: Response to Review Round {N}
@@ -89,7 +89,8 @@ gh pr comment $PR_NUMBER --body "CLAUDE: Response to Review Round {N}
 ## Validation
 - Lint: PASS/FAIL
 - Build: PASS/FAIL
-- Tests: PASS/FAIL (X passed, Y failed)
+- Tests (targeted — this round's changed files): PASS/FAIL (X passed, Y failed; selectors run)
+- Full suite: runs once on the final candidate before CLEAN (Phase 4)
 
 Pushed commit: {SHORT_SHA} {SUBJECT_LINE}"
 ```
