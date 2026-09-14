@@ -89,10 +89,18 @@ apid=$!
   while kill -0 "$apid" 2>/dev/null; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
       : > "$PASS_DIR/.codex-killed"
+      # Snapshot children before killing the parent (they reparent on its death
+      # and pgrep -P would then miss them). SIGTERM first, then a grace period,
+      # then SIGKILL — a stalled codex or child that ignores SIGTERM must not be
+      # able to leave `wait "$apid"` below blocked forever past the deadline.
       cpids="$(pgrep -P "$apid" 2>/dev/null || true)"
-      kill "$apid" 2>/dev/null
+      kill -TERM "$apid" 2>/dev/null
       # shellcheck disable=SC2086  # cpids is a space-separated PID list
-      [ -n "$cpids" ] && kill $cpids 2>/dev/null
+      [ -n "$cpids" ] && kill -TERM $cpids 2>/dev/null
+      sleep 5
+      kill -KILL "$apid" 2>/dev/null
+      # shellcheck disable=SC2086
+      [ -n "$cpids" ] && kill -KILL $cpids 2>/dev/null
       break
     fi
     sleep 5
