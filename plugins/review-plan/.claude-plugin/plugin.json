@@ -1,7 +1,7 @@
 {
   "name": "review-plan",
-  "description": "Facilitates an automated plan review loop using parallel Claude reviewer agents, iterating on feedback until the plan is approved.",
-  "version": "0.5.0",
+  "description": "Facilitates an automated plan review loop using parallel Claude reviewer agents, then a final Codex (gpt-6-astra, high effort) feedback pass, iterating on feedback until the plan is approved.",
+  "version": "0.6.0",
   "author": {
     "name": "Adriel Frederick"
   },
