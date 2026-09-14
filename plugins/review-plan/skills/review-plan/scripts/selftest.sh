@@ -84,19 +84,38 @@ check "old CLI writes .codex-skipped"    '[ -f "$PO/.codex-skipped" ]'
 check "old CLI names the version floor"  'grep -q "0.153.4" "$PO/.codex-skipped"'
 check "old CLI runs no codex exec"       '[ ! -f "$PO/codex.md" ]'
 
-echo "== success: pinned model/effort/sandbox args, block written =="
+echo "== success: pinned model/effort/sandbox args, valid block written =="
 export SANDBOX_TRACE="$WORK/trace.txt"
+export PROMPT_CAPTURE="$WORK/received-prompt.txt"
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
 [ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
 printf '%s\n' "$*" >> "$SANDBOX_TRACE"
 echo "model: gpt-6-astra"
 echo "reasoning effort: high"
-out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
-[ -n "$out" ] && echo "### Findings" > "$out"
+a=("$@")
+out=""; for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
+# Capture the exact final positional arg (the prompt text) — not a
+# space-joined "$*" — so a regression that passes the prompt's filename
+# instead of its content, or mangles it across the $(cat ...) boundary, is
+# caught even when the value contains embedded whitespace/metacharacters.
+printf '%s' "${a[$((${#a[@]}-1))]}" > "$PROMPT_CAPTURE"
+{
+  echo "<claude-reviewer>"
+  echo "Pass 6 - Codex Review - 2026-09-14 00:00 UTC"
+  echo
+  echo "Verdict: ready"
+  echo
+  echo "### Findings"
+  echo "No findings."
+  echo "</claude-reviewer>"
+} > "$out"
 FAKE
 chmod +x "$BIN/codex"
-PS="$WORK/p-success"; mkpass "$PS"; : > "$SANDBOX_TRACE"
+PS="$WORK/p-success"; mkpass "$PS"
+# Distinctive multiline prompt with whitespace and shell metacharacters.
+printf 'Review this plan.\n  indented line with a $VAR and "quotes" and `backticks`\nlast line\n' > "$PS/prompt-codex.txt"
+: > "$SANDBOX_TRACE"
 PATH="$BIN:$PATH" bash "$LAUNCH" --pass-dir "$PS" --repo "$REPO" >/dev/null 2>&1
 rc=$?
 check "success exits 0"                 '[ "$rc" -eq 0 ]'
@@ -107,6 +126,54 @@ check "pinned model gpt-6-astra passed" 'grep -q -- "-m gpt-6-astra" "$SANDBOX_T
 check "pinned effort high passed"       'grep -q -- "model_reasoning_effort=high" "$SANDBOX_TRACE"'
 check "read-only sandbox passed"        'grep -q -- "-s read-only" "$SANDBOX_TRACE"'
 check "repo passed via -C"              'grep -qF -- "-C $REPO" "$SANDBOX_TRACE"'
+# Both sides go through the same $(cat ...) command substitution (which
+# strips trailing newlines), matching exactly what the launcher itself does.
+check "exact prompt content passed"     '[ "$(cat "$PROMPT_CAPTURE")" = "$(cat "$PS/prompt-codex.txt")" ]'
+
+echo "== stale codex.md from a prior attempt is cleared before relaunch =="
+PST="$WORK/p-stale"; mkpass "$PST"
+printf '<claude-reviewer>\nstale content from a prior crashed attempt\n### Findings\nNo findings.\n</claude-reviewer>\n' > "$PST/codex.md"
+: > "$SANDBOX_TRACE"
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+exit 0
+FAKE
+chmod +x "$BIN/codex"
+PATH="$BIN:$PATH" bash "$LAUNCH" --pass-dir "$PST" --repo "$REPO" >/dev/null 2>&1
+rc=$?
+check "stale codex.md: exits non-zero, not silently reused" '[ "$rc" -ne 0 ]'
+check "stale codex.md: cleared, not left in place"          '[ ! -s "$PST/codex.md" ]'
+check "stale codex.md: classified as crashed"                '[ -f "$PST/.codex-crashed" ]'
+
+echo "== malformed block is classified as crashed, not accepted =="
+PM="$WORK/p-malformed"
+write_and_run() {
+  local body="$1"
+  rm -rf "$PM"; mkpass "$PM"
+  cat > "$BIN/codex" <<FAKE
+#!/usr/bin/env bash
+[ "\$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+out=""; a=("\$@"); for ((i=0;i<\${#a[@]};i++)); do [ "\${a[\$i]}" = "-o" ] && out="\${a[\$((i+1))]}"; done
+printf '%s' "$body" > "\$out"
+FAKE
+  chmod +x "$BIN/codex"
+  PATH="$BIN:$PATH" bash "$LAUNCH" --pass-dir "$PM" --repo "$REPO" >/dev/null 2>&1
+}
+write_and_run 'Sorry, I cannot review this plan.'
+rc=$?
+check "no envelope at all: fails"        '[ "'"$rc"'" -ne 0 ]'
+check "no envelope at all: crashed marker" '[ -f "$PM/.codex-crashed" ]'
+
+write_and_run "$(printf '<claude-reviewer>\nVerdict: ready\n### Findings\nNo findings.')"
+rc=$?
+check "missing closing tag: fails"       '[ "'"$rc"'" -ne 0 ]'
+check "missing closing tag: crashed marker" '[ -f "$PM/.codex-crashed" ]'
+
+write_and_run "$(printf '<claude-reviewer>\nVerdict: ready\n</claude-reviewer>')"
+rc=$?
+check "missing Findings section: fails"  '[ "'"$rc"'" -ne 0 ]'
+check "missing Findings section: crashed marker" '[ -f "$PM/.codex-crashed" ]'
 
 echo "== crash: codex exits non-zero =="
 PC="$WORK/p-crash"; mkpass "$PC"

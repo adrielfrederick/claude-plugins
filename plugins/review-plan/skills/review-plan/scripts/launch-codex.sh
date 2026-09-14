@@ -16,7 +16,9 @@
 # Failure is recorded OUT-OF-BAND (review content is model-controlled, so text
 # alone must not be able to spoof the classification):
 #   <pass-dir>/.codex-skipped    — preflight failed (CLI missing/broken/too old)
-#   <pass-dir>/.codex-crashed    — codex exited non-zero without a block
+#   <pass-dir>/.codex-crashed    — codex exited non-zero, produced no output,
+#                                   or produced output that isn't a valid
+#                                   <claude-reviewer> block
 #   <pass-dir>/.codex-killed     — watchdog deadline hit
 # Any of those means "no Codex block this pass" — the orchestrator notes the gap
 # in the transcript and continues to wrap-up. Never a loop failure.
@@ -59,7 +61,10 @@ case "$CODEX_TIMEOUT_SECONDS" in
 esac
 [ "$CODEX_TIMEOUT_SECONDS" -gt 0 ] || die "CODEX_TIMEOUT_SECONDS must be > 0"
 
-rm -f "$PASS_DIR/.codex-skipped" "$PASS_DIR/.codex-crashed" "$PASS_DIR/.codex-killed"
+# codex.md too, not just the marker files — otherwise a rerun in the same
+# pass dir (the documented .codex-crashed retry) that exits 0 with no new
+# output would see the PRIOR attempt's block as fresh and pass validation.
+rm -f "$PASS_DIR/.codex-skipped" "$PASS_DIR/.codex-crashed" "$PASS_DIR/.codex-killed" "$PASS_DIR/codex.md"
 
 # ── Preflight: a missing, broken or too-old CLI skips the pass, never fails it.
 skip() { echo "$*" > "$PASS_DIR/.codex-skipped"; echo "launch-codex.sh: skipped — $*" >&2; exit 1; }
@@ -118,6 +123,19 @@ fi
 if [ "$rc" -ne 0 ] || [ ! -s "$PASS_DIR/codex.md" ]; then
   : > "$PASS_DIR/.codex-crashed"
   echo "launch-codex.sh: codex exited $rc without a block — see $PASS_DIR/log-codex.txt" >&2
+  exit 1
+fi
+
+# A non-empty codex.md is not necessarily a valid block: Codex could exit 0
+# after a refusal, a preamble, or malformed output with no findings section.
+# The orchestrator parses `### Findings`/`### Rulings` lines directly out of
+# this file (SKILL.md's reviewer-block contract), so require the envelope
+# before trusting it, not just non-emptiness.
+if ! grep -q "^<claude-reviewer>" "$PASS_DIR/codex.md" \
+   || ! grep -q "^</claude-reviewer>" "$PASS_DIR/codex.md" \
+   || ! grep -q "^### Findings" "$PASS_DIR/codex.md"; then
+  : > "$PASS_DIR/.codex-crashed"
+  echo "launch-codex.sh: codex.md is not a valid reviewer block (missing <claude-reviewer> envelope or ### Findings) — see $PASS_DIR/codex.md" >&2
   exit 1
 fi
 
