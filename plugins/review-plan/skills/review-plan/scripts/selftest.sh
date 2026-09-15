@@ -4,7 +4,7 @@
 # launcher). This script has no other CI; a regression here silently
 # reintroduces the failures it exists to prevent (a dropped model/effort pin,
 # an unbounded stall past CODEX_TIMEOUT_SECONDS, a crash or empty output read
-# as a successful block). Uses a fake `codex` on PATH so nothing hits the
+# as a successful block, a sandbox that cannot start read as a review). Uses a fake `codex` on PATH so nothing hits the
 # network.
 #
 # Run: bash scripts/selftest.sh   (exit 0 = all pass)
@@ -84,12 +84,34 @@ check "old CLI writes .codex-skipped"    '[ -f "$PO/.codex-skipped" ]'
 check "old CLI names the version floor"  'grep -q "0.153.4" "$PO/.codex-skipped"'
 check "old CLI runs no codex exec"       '[ ! -f "$PO/codex.md" ]'
 
+echo "== preflight: codex sandbox cannot start =="
+PSB="$WORK/p-sandbox"; mkpass "$PSB"
+cat > "$BIN/codex" <<'NOSANDBOX'
+#!/usr/bin/env bash
+[ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "sandbox" ] && { echo "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted" >&2; exit 1; }
+# Reaching exec here is the regression: the launcher must not spend a pass on a
+# host whose sandbox cannot run a single command.
+echo "EXEC REACHED" > "$PSB_DIR/exec-reached"
+exit 0
+NOSANDBOX
+chmod +x "$BIN/codex"
+PATH="$BIN:$PATH" PSB_DIR="$PSB" bash "$LAUNCH" --pass-dir "$PSB" --repo "$REPO" >/dev/null 2>&1
+rc=$?
+check "sandbox probe fails: exits non-zero"       '[ "'"$rc"'" -ne 0 ]'
+check "sandbox probe fails: writes .codex-skipped" '[ -f "$PSB/.codex-skipped" ]'
+check "sandbox probe fails: names the bwrap error" 'grep -q "RTM_NEWADDR" "$PSB/.codex-skipped"'
+check "sandbox probe fails: names the host fix"    'grep -q "bubblewrap" "$PSB/.codex-skipped"'
+check "sandbox probe fails: runs no codex exec"    '[ ! -f "$PSB/exec-reached" ] && [ ! -f "$PSB/codex.md" ]'
+check "sandbox probe fails: not crashed/killed"    '[ ! -f "$PSB/.codex-crashed" ] && [ ! -f "$PSB/.codex-killed" ]'
+
 echo "== success: pinned model/effort/sandbox args, valid block written =="
 export SANDBOX_TRACE="$WORK/trace.txt"
 export PROMPT_CAPTURE="$WORK/received-prompt.txt"
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
 [ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "sandbox" ] && exit 0
 printf '%s\n' "$*" >> "$SANDBOX_TRACE"
 echo "model: gpt-6-astra"
 echo "reasoning effort: high"
@@ -137,6 +159,7 @@ printf '<claude-reviewer>\nstale content from a prior crashed attempt\n### Findi
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
 [ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "sandbox" ] && exit 0
 exit 0
 FAKE
 chmod +x "$BIN/codex"
@@ -154,6 +177,7 @@ write_and_run() {
   cat > "$BIN/codex" <<FAKE
 #!/usr/bin/env bash
 [ "\$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "\$1" = "sandbox" ] && exit 0
 out=""; a=("\$@"); for ((i=0;i<\${#a[@]};i++)); do [ "\${a[\$i]}" = "-o" ] && out="\${a[\$((i+1))]}"; done
 printf '%s' "$body" > "\$out"
 FAKE
@@ -180,6 +204,7 @@ PC="$WORK/p-crash"; mkpass "$PC"
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
 [ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "sandbox" ] && exit 0
 exit 1
 FAKE
 chmod +x "$BIN/codex"
@@ -194,6 +219,7 @@ PE="$WORK/p-empty"; mkpass "$PE"
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
 [ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "sandbox" ] && exit 0
 exit 0
 FAKE
 chmod +x "$BIN/codex"
@@ -207,6 +233,7 @@ PW="$WORK/p-watchdog"; mkpass "$PW"
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
 [ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "sandbox" ] && exit 0
 trap '' TERM
 sleep 120
 FAKE
