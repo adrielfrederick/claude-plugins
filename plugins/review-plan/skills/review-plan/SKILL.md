@@ -453,12 +453,33 @@ Number new findings P{N}-H1, P{N}-H2, ... Use `Verdict: stop review` when every 
 
 - Claude reviewer agents (passes 1–5) are launched via the **Agent tool** with `model: "sonnet"` (dimension passes) or `model: "fable"` (holistic passes). Pass 6 is the only pass that needs an external CLI: `scripts/launch-codex.sh` runs the **Codex CLI** with `gpt-6-astra` at `high` reasoning effort, pinned in the script (the single source of truth — a host's `~/.codex/config.toml` default is deliberately not relied on; the devbox sets none). The pin was verified on 2026-09-14 on the laptop (codex 0.153.4) and the devbox (0.154.0); the script's `MIN_CODEX` floor is the lowest of those. To change the model, effort, timeout or floor, edit the script and bump the plugin version.
 - Codex is optional at runtime: if the CLI is missing, broken, too old, out of capacity, or stalls past `CODEX_TIMEOUT_SECONDS`, the launcher leaves a marker file and exits 1, and the review completes without pass 6 (gap noted in the transcript and the wrap-up). Install/update with `codex update` on a laptop; on the devbox it lives at `~/.local/bin/codex`, which is on PATH only in a login shell (`bash -lc`).
+- **The Codex sandbox must be able to start on the host.** The launcher probes it (`codex sandbox -- /usr/bin/true`) before spending a pass, because `codex exec` only enters the OS sandbox when the model runs a shell command: a host where the sandbox is broken still answers a "reply PONG" smoke test, and then returns a well-formed block saying it could read nothing. On **Ubuntu 24.04** (the devbox) `bwrap` fails with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`, because 24.04 sets `kernel.apparmor_restrict_unprivileged_userns=1`: an unconfined process may create a user namespace but gets no capabilities inside it, so bwrap cannot configure the namespace's loopback. Neither Codex's bundled `bwrap` nor the system `bubblewrap` package (verified 2026-09-14, 0.9.0-1ubuntu0.1) ships an exempting profile. The fix is the distro's own pattern for such tools (see `/etc/apparmor.d/1password`, `Discord`): install the system package so Codex uses `/usr/bin/bwrap` (it prefers a `bwrap` on PATH over its bundled copy), then load an unconfined profile that grants it `userns`:
+
+  ```
+  sudo apt install -y bubblewrap
+  sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+  abi <abi/4.0>,
+  include <tunables/global>
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/bwrap>
+  }
+  EOF
+  sudo apparmor_parser -r /etc/apparmor.d/bwrap
+  codex sandbox -- /usr/bin/true && echo sandbox-ok
+  ```
+
+  The broader alternative, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`, lifts the mitigation for every unprivileged process; prefer the per-binary profile. A failed probe is a `.codex-skipped` whose one line names the error and points here. There is deliberately **no** `CODEX_SANDBOX_UNAVAILABLE` bypass here, unlike pr-review-loop: running an external model's shell commands unsandboxed is defensible only on a throwaway container, and this skill runs on persistent machines with credentials. Fix the host, or run the review on one whose sandbox works.
 - `"fable"` is the Agent tool's alias for the current Claude Fable model, so the holistic pass tracks the newest Fable release without a change here. If the Agent tool on a host rejects `model: "fable"` (older Claude Code, or no Fable access), fall back to `model: "opus"` for that pass and say so in the transcript.
 - All agents for a pass MUST be launched in a single message (parallel tool calls) to minimise wall-clock time.
 - Verify passes resume the original reviewer when the harness allows (SendMessage to the agent returned by the Agent tool). A resumed agent keeps its model. A fresh verify agent gets the prior block path in its packet so it can re-check the same evidence.
 - Reviewers write blocks to `$SCRATCH/pass-N/`, never to the review document. Only the orchestrator writes the review document, so the transcript is always in pass order and a block can never land after its response. `/tmp` is per-host and per-boot; the transcript in the repo is the durable record.
 - If an agent fails or times out, note the gap in the transcript and continue with the blocks you have. Never treat a missing block as `ready`.
 - The ledger is the single source of truth for review state. The transcript is the audit trail. A reviewer that wants the history reads the ledger first and the transcript only for the reasoning behind a specific row.
+
+## What changed in 0.6.3 (and why)
+
+The launcher probes the Codex sandbox before launching. The first real pass 6 on the devbox produced a well-formed block that said Codex could read nothing: every shell command had died at sandbox setup (`bwrap: loopback: Failed RTM_NEWADDR`), a failure the pre-release smoke test could not see because a prompt that only replies never enters the sandbox. The probe runs one command through the same sandbox and skips the pass with the error and the host fix when it fails. The host fix on Ubuntu 24.04 is the system `bubblewrap` package; no sandbox bypass was added (see Notes).
 
 ## What changed in 0.6.0 (and why)
 

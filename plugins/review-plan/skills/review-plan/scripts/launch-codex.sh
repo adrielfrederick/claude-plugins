@@ -77,6 +77,24 @@ if [ "$(printf '%s\n%s\n' "$MIN_CODEX" "$have" | sort -V | head -1)" != "$MIN_CO
   skip "codex $have is older than $MIN_CODEX, the floor verified for $CODEX_MODEL (run 'codex update')"
 fi
 
+# ── Sandbox probe. `codex exec -s read-only` only enters the OS sandbox when the
+# model runs a shell command, so a CLI that launches and answers fine can still
+# have a sandbox that cannot start — and Codex then returns a well-formed block
+# saying it read nothing (observed 2026-09-14 on the Ubuntu 24.04 devbox:
+# `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`, because 24.04
+# restricts unprivileged user namespaces via AppArmor and neither Codex's bundled
+# bwrap nor the system `bubblewrap` package carries an exempting profile — one
+# has to be installed, see SKILL.md Notes). Run one
+# command through the same sandbox before spending a pass on it (/usr/bin/true:
+# macOS has no /bin/true; Ubuntu 24.04 has both). Deliberately no
+# CODEX_SANDBOX_UNAVAILABLE bypass here, unlike pr-review-loop: that bypass is
+# defensible only on a throwaway container, and review-plan runs on persistent
+# machines with credentials — fix the host instead.
+probe_out="$(cd "$REPO" && codex sandbox -- /usr/bin/true 2>&1)"; probe_rc=$?
+if [ "$probe_rc" -ne 0 ]; then
+  skip "codex sandbox cannot start on this host (exit $probe_rc: ${probe_out:-no output}). On Ubuntu 24.04: 'sudo apt install bubblewrap', then load an AppArmor profile granting /usr/bin/bwrap 'userns,' (flags=(unconfined), same pattern as /etc/apparmor.d/1password) — see review-plan SKILL.md Notes."
+fi
+
 # ── Launch under a deadline-based watchdog (not `sleep N && kill`: a sleep timer
 # is suspended on machine sleep and never fires; a wall-clock poll kills on the
 # first tick after wake). Same rationale as pr-review-loop's launch-agents.sh.
