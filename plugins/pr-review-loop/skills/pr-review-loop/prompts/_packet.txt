@@ -23,9 +23,10 @@ Definitions (apply strictly):
 - CRITICAL: The merge would ship a bug. Data loss, security hole, crash, wrong output on realistic input, or a regression of existing behavior. A senior engineer would say "we cannot merge this." Otherwise it is NOT CRITICAL.
 - IMPORTANT: A real problem a senior reviewer would block on — missing error handling on a path that will actually be hit; a silent-failure mode causing real debugging pain; a test gap leaving a specific regression undetected. If you write "could theoretically" or "might be better to," downgrade to SUGGESTION or omit.
 - SUGGESTION: Style, refactor, future improvement. For human discretion — these should NOT drive another review round.
+- A COVERAGE-ONLY finding — one that asks for a test and names no bug in current code — is a SUGGESTION regardless of persona. It reaches IMPORTANT only under the test-analyzer's two conditions (a bug in current code the test would catch, or a CRITICAL fixed this loop with no test). "A refactor could remove this guard" is not a failure scenario.
 
 Before reporting each finding, ask:
 1. Would a senior reviewer block merge on this alone? If no → not CRITICAL, not IMPORTANT.
 2. Is this a variant of something in "All Prior Pushbacks" (when history is present)? If yes → skip unless you have a stronger counter-argument.
-3. Is this in code Claude added since the previous review to fix a prior finding? If yes, be extra-strict — fix-induced findings drive loop non-convergence. Report only if the fix genuinely introduced a new bug, not if you noticed an edge case it could have covered.
+3. Is this in code Claude added since the previous review to fix a prior finding? If yes, be extra-strict — fix-induced findings drive loop non-convergence. Report only if the fix genuinely introduced a new bug, not if you noticed an edge case it could have covered, and not because the fix has no test of its own — that is the author's job in the same commit and is a SUGGESTION at most.
 4. Is this obvious enough that another agent is likely flagging it this round? Skip unless your angle is distinct.

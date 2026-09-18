@@ -18,9 +18,14 @@
 #   history-io.sh rounds-parse          < comment-body
 #       → the lifetime round count from a `pr-review-loop:rounds N` marker;
 #         empty if absent or malformed
-#   history-io.sh rounds-total [FILE]   < comment-body
-#       → max(FILE's count, the marker's count), or 0 — the PR's lifetime
-#         review-round total. See the fix-budget note below.
+#   history-io.sh rounds-total [FILE]   < comment-bodies
+#       → max(FILE's count, every marker's count), or 0 — the PR's lifetime
+#         review-round total. stdin may hold MANY comment bodies (Phase 0 joins
+#         them all): the summary AND the per-round progress comment carry the
+#         marker, so a run killed mid-loop still counts. See the note below.
+#   history-io.sh rounds-filter
+#       → the jq expression Phase 0 passes to `gh pr view -q` to get every
+#         comment body joined by newlines (input for rounds-total).
 set -u
 
 : "${MARKER_MAX_AGE:=4500}"
@@ -46,7 +51,12 @@ parse_epoch() { sed -n 's/.*pr-review-loop:running [^ ]* \([0-9][0-9]*\).*/\1/p'
 # Max rather than "prefer one", because either source can be legitimately absent
 # and the failure that matters is UNDERCOUNTING: that silently hands back budget
 # the PR has already spent, which is the exact bug this exists to close.
-parse_rounds() { sed -n 's/.*pr-review-loop:rounds \([0-9][0-9]*\).*/\1/p' | head -1; }
+# MAX of every marker on stdin, not the first: since 0.15.0 the progress
+# comment carries the marker too (rewritten every round), so a run that dies
+# mid-loop still leaves its round count on the PR — the CI run on
+# f1-predictions#1155 completed 7 rounds, posted no summary, and the next run
+# started from PRIOR_ROUNDS=0. Phase 0 now feeds every comment body in at once.
+parse_rounds() { sed -n 's/.*pr-review-loop:rounds \([0-9][0-9]*\).*/\1/p' | sort -n | tail -1; }
 
 # Digits-only, bounded read. Anything else in the file (empty, a stray newline,
 # a half-written value from a killed run) reads as 0 rather than erroring — a
@@ -95,6 +105,9 @@ case "${1:-}" in
     exit 0                                          # fresh, another host → block
     ;;
   rounds-parse) parse_rounds ;;
+  rounds-filter)
+    printf '%s' '[.comments[].body] | join("\n")'
+    ;;
   rounds-total)
     # stdin is optional here: on the fast path (local file present) the caller
     # may pipe in nothing at all, and an absent marker is not an error.
@@ -104,7 +117,7 @@ case "${1:-}" in
     if [ "$pr_n" -gt "$file_n" ]; then printf '%s\n' "$pr_n"; else printf '%s\n' "$file_n"; fi
     ;;
   *)
-    echo "usage: history-io.sh {extract|history-filter|marker-host|marker-epoch|marker-blocks H NOW|rounds-parse|rounds-total [FILE]}" >&2
+    echo "usage: history-io.sh {extract|history-filter|marker-host|marker-epoch|marker-blocks H NOW|rounds-parse|rounds-filter|rounds-total [FILE]}" >&2
     exit 2
     ;;
 esac

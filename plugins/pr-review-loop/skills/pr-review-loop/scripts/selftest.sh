@@ -882,6 +882,165 @@ check "gh-io: empty body dies"  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHI
 check "gh-io: unknown subcommand dies" '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" frobnicate 2>/dev/null'
 fi
 
+echo "== loop-state.sh (counters + exit decision) =="
+# Every cap the skill defines was prose on f1-predictions#1155 and every one
+# failed: the per-run cap was sidestepped by a self-started second run, the
+# per-PR budget was never evaluated, the fix-induced streak never mentioned.
+# The counters and the verdict now live here, so each rule is pinned.
+LS="$DIR/loop-state.sh"
+ST="$WORK/ls-state"; RF="$WORK/ls-rounds"; mkdir -p "$ST"
+check "init writes the state file"      'bash "$LS" init --state "$ST/state" --rounds-file "$RF" --prior-rounds 2 >/dev/null && [ -f "$ST/state" ]'
+check "init refuses a second init"      '! bash "$LS" init --state "$ST/state" --rounds-file "$RF" --prior-rounds 2 2>/dev/null'
+check "init rejects a non-numeric prior" '! bash "$LS" init --state "$WORK/ls-x" --rounds-file "$RF" --prior-rounds abc 2>/dev/null'
+check "init requires --rounds-file"     '! bash "$LS" init --state "$WORK/ls-y" --prior-rounds 0 2>/dev/null'
+check "init warns when the PR is already over budget" 'bash "$LS" init --state "$WORK/ls-over" --rounds-file "$RF" --prior-rounds 12 2>&1 | grep -q "WARNING"'
+check "get ITERATION starts at 0"       '[ "$(bash "$LS" get --state "$ST/state" ITERATION)" = "0" ]'
+check "get ROUNDS_INCLUDING_CURRENT is prior+1" '[ "$(bash "$LS" get --state "$ST/state" ROUNDS_INCLUDING_CURRENT)" = "3" ]'
+check "get SFH_EFFORT is high at start"  '[ "$(bash "$LS" get --state "$ST/state" SFH_EFFORT)" = "high" ]'
+check "get unknown key dies"            '! bash "$LS" get --state "$ST/state" NOPE 2>/dev/null'
+check "get without state file dies"     '! bash "$LS" get --state "$WORK/no-such-state" ITERATION 2>/dev/null'
+check "set LAST_FIX_BASE_SHA accepts hex" 'bash "$LS" set --state "$ST/state" LAST_FIX_BASE_SHA abc1234 >/dev/null && [ "$(bash "$LS" get --state "$ST/state" LAST_FIX_BASE_SHA)" = "abc1234" ]'
+check "set rejects a non-hex sha"        '! bash "$LS" set --state "$ST/state" LAST_FIX_BASE_SHA "not a sha" 2>/dev/null'
+check "set rejects a counter"            '! bash "$LS" set --state "$ST/state" ITERATION 5 2>/dev/null'
+check "set rejects a bad fix class"      '! bash "$LS" set --state "$ST/state" LAST_FIX_CLASS nope 2>/dev/null'
+# ── triage (Phase 2): the diminishing-returns exit ──
+tri() { bash "$LS" triage --state "$ST/state" "$@"; }
+check "triage never exits on round 0"    '[ "$(tri --criticals 0 --findings 2 --fix-induced 0 --coverage-only 2)" = "FIX" ]'
+check "triage rejects buckets > findings" '! tri --criticals 0 --findings 1 --fix-induced 1 --coverage-only 1 2>/dev/null'
+re() { bash "$LS" round-end --state "$ST/state" "$@"; }
+out="$(re --criticals 1 --findings 3 --fix-induced 0 --coverage-only 1 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0)"
+check "round 0 with a CRITICAL continues full" '[ "$out" = "CONTINUE scoped=0 severity_floor=0 sfh_effort=high" ]'
+check "round-end advances ITERATION"     '[ "$(bash "$LS" get --state "$ST/state" ITERATION)" = "1" ]'
+check "round-end persists prior+iter to the rounds file" '[ "$(cat "$RF")" = "3" ]'
+check "triage: all fix-induced/coverage after round 0 exits" '[ "$(tri --criticals 0 --findings 2 --fix-induced 1 --coverage-only 1)" = "EXIT NEEDS_HUMAN_REVIEW diminishing-returns" ]'
+check "triage: one substantive finding keeps fixing" '[ "$(tri --criticals 0 --findings 3 --fix-induced 1 --coverage-only 1)" = "FIX" ]'
+check "triage: a CRITICAL keeps fixing"  '[ "$(tri --criticals 1 --findings 1 --fix-induced 1 --coverage-only 0)" = "FIX" ]'
+check "triage: a scoped round keeps fixing" '[ "$(tri --scoped 1 --criticals 0 --findings 1 --fix-induced 1 --coverage-only 0)" = "FIX" ]'
+check "triage: zero findings is FIX (nothing to do)" '[ "$(tri --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0)" = "FIX" ]'
+# ── round-end (Phase 4): next-round type, streaks, floor ──
+out="$(re --criticals 0 --findings 2 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class tests --scoped 0)"
+check "tests-only fix after a clean review earns a scoped verify" '[ "$out" = "CONTINUE scoped=1 severity_floor=0 sfh_effort=medium" ]'
+out="$(re --criticals 0 --findings 1 --fix-induced 1 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 1)"
+check "scoped round with a finding escalates to a full batch" 'printf "%s" "$out" | grep -q "^CONTINUE scoped=0"'
+check "scoped round does not earn severity-floor credit" 'printf "%s" "$out" | grep -q "severity_floor=0"'
+out="$(re --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0)"
+check "second clean full round raises the severity floor" 'printf "%s" "$out" | grep -q "severity_floor=1"'
+check "a substantive finding resets the fix-induced streak" '[ "$(bash "$LS" get --state "$ST/state" FIX_INDUCED_ROUNDS)" = "0" ]'
+out="$(re --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 1 --code-changed 0 --fix-class tests --scoped 0)"
+check "no code change + 0 CRITICAL is CLEAN (clean-on-pushback)" 'printf "%s" "$out" | grep -q "^EXIT CLEAN"'
+check "an empty change set is forced to prod class" '[ "$(bash "$LS" get --state "$ST/state" LAST_FIX_CLASS)" = "prod" ]'
+check "round-end refuses to run after an exit" '! re --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
+# validation-fix: the CLEAN gate failed, a fix was pushed — void the CLEAN, count nothing
+out="$(bash "$LS" validation-fix --state "$ST/state" --fix-class tests)"
+check "validation-fix sets scoped next without counting a round" '[ "$out" = "CONTINUE scoped=1 severity_floor=1 sfh_effort=medium" ] && [ "$(bash "$LS" get --state "$ST/state" ITERATION)" = "5" ]'
+check "validation-fix voids the CLEAN"   '[ -z "$(bash "$LS" get --state "$ST/state" EXIT_STATUS)" ]'
+check "round-end runs again after validation-fix" 're --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 1 | grep -q "^EXIT CLEAN"'
+# ── every exit status, each on a fresh state ──
+fresh() { rm -rf "$WORK/ls-$1"; mkdir -p "$WORK/ls-$1"; bash "$LS" init --state "$WORK/ls-$1/state" --rounds-file "$WORK/ls-$1/rounds" "${@:2}" >/dev/null 2>&1; }
+rend() { bash "$LS" round-end --state "$WORK/ls-$1/state" "${@:2}"; }
+fresh standoff --prior-rounds 0
+check "declined CRITICAL with no change → NEEDS_HUMAN_REVIEW" 'rend standoff --criticals 1 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 1 --code-changed 0 --fix-class prod --scoped 0 | grep -q "^EXIT NEEDS_HUMAN_REVIEW critical-declined"'
+check "validation-fix refuses after a non-CLEAN exit" '! bash "$LS" validation-fix --state "$WORK/ls-standoff/state" --fix-class tests >/dev/null 2>&1'
+fresh maxit --prior-rounds 0 --max-iterations 2
+rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
+check "per-run cap → MAX_ITERATIONS_REACHED" 'rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT MAX_ITERATIONS_REACHED"'
+fresh budget --prior-rounds 11 --max-pr-rounds 12
+check "per-PR budget counts prior rounds → FIX_BUDGET_EXHAUSTED" 'rend budget --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT FIX_BUDGET_EXHAUSTED pr-rounds"'
+check "budget exit still persists the lifetime count" '[ "$(cat "$WORK/ls-budget/rounds")" = "12" ]'
+fresh cleanlast --prior-rounds 11 --max-pr-rounds 12
+check "CLEAN outranks the budget on the last allowed round" 'rend cleanlast --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 | grep -q "^EXIT CLEAN"'
+fresh streak --prior-rounds 0 --max-fix-induced 2
+rend streak --criticals 0 --findings 1 --fix-induced 0 --coverage-only 1 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
+check "fix-induced streak backstop → FIX_BUDGET_EXHAUSTED" 'rend streak --criticals 0 --findings 2 --fix-induced 1 --coverage-only 1 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT FIX_BUDGET_EXHAUSTED fix-induced"'
+fresh timed --prior-rounds 0 --timeout 1
+sleep 2
+check "wall clock → TIMED_OUT"           'rend timed --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT TIMED_OUT"'
+fresh wdk --prior-rounds 0
+check "all agents watchdog-killed → CODEX_DEGRADED" 'rend wdk --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 --all-watchdog-killed | grep -q "^EXIT CODEX_DEGRADED"'
+fresh forced --prior-rounds 4
+check "forced exit is echoed verbatim"   '[ "$(rend forced --criticals 0 --findings 2 --fix-induced 1 --coverage-only 1 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns)" = "EXIT NEEDS_HUMAN_REVIEW diminishing-returns" ]'
+check "forced exit still counts the round" '[ "$(cat "$WORK/ls-forced/rounds")" = "5" ]'
+fresh args --prior-rounds 0
+check "round-end rejects a bad --code-changed" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed yes --fix-class prod --scoped 0 2>/dev/null'
+check "round-end rejects a bad --fix-class" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class nope --scoped 0 2>/dev/null'
+check "round-end rejects a missing count" '! rend args --criticals 0 --findings 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 2>/dev/null'
+check "a corrupt state file dies, not silently resets" 'printf "BOGUS=1\n" > "$WORK/ls-args/state" && ! bash "$LS" get --state "$WORK/ls-args/state" ITERATION 2>/dev/null'
+
+echo "== diff-size.sh (PR-size gate + test budget) =="
+# f1-predictions#1155 started at 3,900 added lines; a packet that size never
+# converges and the repo's "split before labeling" rule was not followed. The
+# gate counts what a reviewer reads — JSON, lockfiles, binaries and friends are
+# artifacts — and the --since mode is the fixer's test budget (Phase 3).
+DS="$DIR/diff-size.sh"
+FS="$WORK/fixture-size"
+git init -q -b main "$FS" 2>/dev/null || { git init -q "$FS"; git -C "$FS" checkout -qb main; }
+git -C "$FS" config user.email t@t; git -C "$FS" config user.name t
+mkdir -p "$FS/src" "$FS/tests" "$FS/data"
+printf 'base\n' > "$FS/src/a.py"; printf 'x\n' > "$FS/data/big.json"
+git -C "$FS" add -A; git -C "$FS" commit -qm base
+git -C "$FS" checkout -qb feature
+seq 1 10 > "$FS/src/a.py"                       # +10 -1 prod
+seq 1 4  > "$FS/tests/test_a.py"                # +4 tests
+seq 1 100 > "$FS/data/big.json"                 # +100 -1 artifact (json)
+seq 1 50 > "$FS/poetry.lock"                    # +50 artifact (lockfile)
+printf '\211PNG\000\001bin\000' > "$FS/img.png"   # binary
+seq 1 7 > "$FS/notes.md"                        # +7 counted (docs are read)
+git -C "$FS" add -A; git -C "$FS" commit -qm "author"
+LOOPSTART="$(git -C "$FS" rev-parse HEAD)"
+seq 1 13 > "$FS/src/a.py"                       # loop: +3 prod
+seq 1 12 > "$FS/tests/test_a.py"                # loop: +8 tests
+git -C "$FS" mv data/big.json data/moved.json; seq 1 105 > "$FS/data/moved.json"   # renamed artifact, +5
+git -C "$FS" add -A; git -C "$FS" commit -qm "loop fixes"
+out="$(bash "$DS" --repo "$FS" --base-ref main --since "$LOOPSTART")"; rc=$?
+kv() { printf '%s\n' "$out" | sed -n "s/^$1=//p"; }
+check "size: counts reviewable lines only"     '[ "$(kv counted_added)" = "32" ]'
+check "size: excludes json + lockfile lines"   '[ "$(kv excluded_added)" = "155" ]'
+# 4 = the lockfile, the binary, and the json seen as delete+add (base→HEAD has
+# no rename: the 1-line base file and the 105-line result share nothing).
+check "size: excluded file count includes binary" '[ "$(kv excluded_files)" = "4" ]'
+check "size: renamed artifact stays excluded"  '! printf "%s" "$out" | grep -q "moved.json"'
+check "size: default verdict OK"               '[ "$(kv verdict)" = "OK" ] && [ "$rc" -eq 0 ]'
+check "size: loop prod lines since start"      '[ "$(kv loop_prod_added)" = "3" ]'
+check "size: loop test lines since start"      '[ "$(kv loop_test_added)" = "8" ]'
+check "size: test budget EXCEEDED when tests > prod" '[ "$(kv test_budget)" = "EXCEEDED" ]'
+check "size: lists top counted files"          'printf "%s" "$out" | grep -q "src/a.py"'
+check "size: no --since → no budget keys"      '[ -z "$(bash "$DS" --repo "$FS" --base-ref main | sed -n "s/^test_budget=//p")" ]'
+out="$(bash "$DS" --repo "$FS" --base-ref main --warn 30)"; rc=$?
+check "size: WARN at the warn threshold, exit 0" '[ "$(kv verdict)" = "WARN" ] && [ "$rc" -eq 0 ]'
+out="$(bash "$DS" --repo "$FS" --base-ref main --warn 10 --stop 30)"; rc=$?
+check "size: STOP at the stop threshold, exit 3" '[ "$(kv verdict)" = "STOP" ] && [ "$rc" -eq 3 ]'
+out="$(bash "$DS" --repo "$FS" --base-ref main --warn 10 --stop 0)"; rc=$?
+check "size: --stop 0 disables the stop"       '[ "$(kv verdict)" = "WARN" ] && [ "$rc" -eq 0 ]'
+out="$(PR_SIZE_EXCLUDE='*.md' bash "$DS" --repo "$FS" --base-ref main)"
+check "size: PR_SIZE_EXCLUDE adds a pattern"   '[ "$(kv counted_added)" = "25" ]'
+out="$(bash "$DS" --repo "$FS" --base-ref main --exclude 'notes.md' --exclude 'tests/*')"
+check "size: --exclude is repeatable"          '[ "$(kv counted_added)" = "13" ]'
+check "size: test budget on a prod-heavy loop is OK" '[ "$(bash "$DS" --repo "$FS" --base-ref main --since "$LOOPSTART" --exclude "tests/*" | sed -n "s/^test_budget=//p")" = "OK" ]'
+check "size: unresolvable base dies"           '! bash "$DS" --repo "$FS" --base-ref nope 2>/dev/null'
+check "size: unresolvable --since dies"        '! bash "$DS" --repo "$FS" --base-ref main --since nope 2>/dev/null'
+check "size: non-numeric threshold dies"       '! bash "$DS" --repo "$FS" --base-ref main --warn lots 2>/dev/null'
+check "size: not-a-repo dies"                  '! bash "$DS" --repo "$WORK" --base-ref main 2>/dev/null'
+
+echo "== 0.15.0 wiring (rounds across comments, base-ref hand-off, prompt rules) =="
+# The CI run on #1155 completed 7 rounds, died on the wall clock, and the next
+# run started from PRIOR_ROUNDS=0: the count lived only in a summary that was
+# never posted. The progress comment now carries the marker too, and Phase 0
+# reads the MAX across every comment.
+MULTI="$(printf '<!-- pr-review-loop:rounds 7 -->\nprogress\n<!-- pr-review-loop:rounds 12 -->\n<!-- pr-review-loop:rounds 3 -->\n')"
+check "rounds-total takes the max of several markers" '[ "$(printf "%s" "$MULTI" | bash "$HIO" rounds-total "$WORK/nonexistent")" = "12" ]'
+check "rounds-total: file still wins when ahead"      '[ "$(printf "%s" "$MULTI" | bash "$HIO" rounds-total "$WORK/rounds-file.txt")" = "13" ]'
+if command -v jq >/dev/null 2>&1; then
+  printf '%s' '{"comments":[{"body":"<!-- pr-review-loop:rounds 4 -->"},{"body":"<!-- pr-review-loop:progress -->\n<!-- pr-review-loop:rounds 9 -->"},{"body":"chat"}]}' > "$WORK/comments-rounds.json"
+  check "rounds-filter + rounds-total read every comment" '[ "$(jq -r "$(bash "$HIO" rounds-filter)" < "$WORK/comments-rounds.json" | bash "$HIO" rounds-total "$WORK/nonexistent")" = "9" ]'
+fi
+check "refresh-packet writes base-ref.txt"           '[ "$(cat "$PK/base-ref.txt")" = "origin/main" ]'
+check "diff-size accepts the packet base ref"        'bash "$DS" --repo "$FS" --base-ref "$(git -C "$FS" rev-parse main)" >/dev/null'
+check "test-analyzer: coverage is SUGGESTION by default" 'grep -q "SUGGESTION by default" "$RC/prompt-test-analyzer.txt"'
+check "test-analyzer: no test requests for the previous fix" 'grep -q "PREVIOUS round" "$RC/prompt-test-analyzer.txt"'
+check "test-analyzer: one IMPORTANT per round after round 0" 'grep -q "ONE IMPORTANT/CRITICAL finding per round" "$RC/prompt-test-analyzer.txt"'
+check "packet preamble: coverage-only rule is shared" 'grep -q "COVERAGE-ONLY finding" "$RC/prompt-silent-failure-hunter.txt"'
+check "code-reviewer no longer owns coverage gaps" 'grep -q "coverage gaps belong to the test-analyzer" "$RC/prompt-code-reviewer.txt"'
+
 echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]

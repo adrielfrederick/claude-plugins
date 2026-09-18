@@ -9,7 +9,7 @@ Orchestrate a review loop between **Codex** (reviewer) and **Claude** (author) o
 
 ## Priorities (ranked — the loop's behavior must reflect these)
 
-1. **Code quality.** More reviews can help, but nonsense findings and loop-induced churn destroy quality. Stop when marginal findings are no longer worth addressing.
+1. **Code quality.** More reviews can help, but nonsense findings and loop-induced churn destroy quality. Stop when marginal findings are no longer worth addressing. Tests the loop adds are code the PR has to carry: a loop that has added more test lines than production lines has stopped improving quality (Phase 3).
 2. **Token efficiency.** Don't burn tokens on findings that won't change the code. Every round after convergence is waste.
 3. **Wall time.** Parallelize where possible, but never at the cost of accuracy or reliability.
 
@@ -53,10 +53,12 @@ If either is missing, stop and tell the user with the install link from the erro
 1. `git rev-parse --show-toplevel` to confirm we're in a git repo.
 2. `gh pr view --json number,baseRefName,headRefName,url` — if no PR, stop and tell the user.
 3. Extract: `PR_NUMBER`, `BASE_BRANCH`, `HEAD_BRANCH`, `PR_URL`, `OWNER_REPO` (`gh repo view --json nameWithOwner -q .nameWithOwner`).
-4. `START_TIME=$(date +%s)`, `ITERATION=0`, `CONSECUTIVE_CLEAN_ROUNDS=0`.
-5. Safety nets: `MAX_ITERATIONS=10`, `TIMEOUT_SECONDS=3600` (whole-loop, across rounds), `AGENT_TIMEOUT_SECONDS=900` (per-agent wall-clock watchdog — see Phase 1 Step 4). These are caps, NOT budgets — do not reduce thoroughness to fit within them. Note `TIMEOUT_SECONDS` is evaluated only *between* rounds (Phase 4) and so cannot interrupt a round that is currently hung; `AGENT_TIMEOUT_SECONDS` is the guard that actually bounds a single round's wall time.
+4. **Loop state lives in a file, not in your head.** Every counter the exit decision reads — `ITERATION`, `START_TIME`, `PR_ROUNDS_TOTAL`, `CONSECUTIVE_CLEAN_ROUNDS`, `FIX_INDUCED_ROUNDS`, `SEVERITY_FLOOR_ACTIVE`, `SCOPED_NEXT`, `LAST_FIX_CLASS` — is owned by `scripts/loop-state.sh` and stored in `$RUN_DIR/state`. You never increment a counter, and you never evaluate an exit condition yourself: Phase 2 asks the script whether to fix (`triage`), Phase 4 asks it whether to continue (`round-end`), and you do what it prints. It is initialised in Step 8, once `PRIOR_ROUNDS` is known.
 
-   **Fix budget (per-PR, spans runs): `MAX_PR_ROUNDS=12`, `MAX_FIX_INDUCED_ROUNDS=3`, `FIX_INDUCED_ROUNDS=0`.** Every cap above resets when a run starts, so they bound a RUN and not a PR — remove and re-add the `review` label and the loop gets a fresh 10 iterations and a fresh hour. A PR the loop cannot converge on therefore grinds on indefinitely, one run at a time, and that is a *different* failure from any single run being too slow: f1-predictions#623 spent 13 rounds across two runs without either run reaching `MAX_ITERATIONS`. `MAX_PR_ROUNDS` counts rounds the PR has had **in total** (Step 8 below) and is what actually terminates such a PR. Both feed the `FIX_BUDGET_EXHAUSTED` exit in Phase 4.
+   **Why (0.15.0):** on f1-predictions#1155 every cap below was prose the model had to remember, and every one failed differently across a 24-round, three-run loop: the per-run cap fired and the driver started "run 2" itself; the per-PR budget was never evaluated in the second run; the fix-induced counter was never mentioned in 17 rounds. Counters in a long context get skipped; a verdict printed by a script gets obeyed.
+5. Caps (defaults inside `loop-state.sh init`; override only if the user asks): `MAX_ITERATIONS=10` per run, `TIMEOUT_SECONDS=3600` per run, `MAX_PR_ROUNDS=12` per PR across all runs, `MAX_FIX_INDUCED_ROUNDS=3`, plus `AGENT_TIMEOUT_SECONDS=900` (per-agent wall-clock watchdog — see Phase 1 Step 4; not a loop-state key). These are caps, NOT budgets — do not reduce thoroughness to fit within them. `TIMEOUT_SECONDS` is evaluated only *between* rounds and cannot interrupt a hung round; `AGENT_TIMEOUT_SECONDS` is what bounds a single round's wall time.
+
+   **A run that exits on any cap is over for this session.** `MAX_ITERATIONS_REACHED`, `FIX_BUDGET_EXHAUSTED`, `TIMED_OUT`: post the wrap-up and stop. Never start a second run yourself to "review the last round's fixes" — that is exactly how #1155 went from 10 rounds to 17 in one session, and `loop-state.sh` refuses a second `init` in the same run dir for that reason. A new run needs a human: re-label in CI, or re-invoke the skill. `MAX_PR_ROUNDS` is the cap that survives that re-label (it counts every round the PR has ever had — Step 8), and it is what terminates a PR the loop cannot converge on; f1-predictions#623 spent 13 rounds across two runs without either reaching the per-run cap.
 6. **Locate the bundled scripts.** This skill ships its helper scripts and prompt fragments next to this SKILL.md, under `scripts/` and `prompts/`. Set `SKILL_DIR` to **this skill's base directory** — the absolute path printed as "Base directory for this skill" when the skill loads (equivalently, the directory this SKILL.md lives in). Anchoring on the base dir works for **both** install layouts: standalone (`~/.claude/skills/pr-review-loop`) and plugin (`.../plugins/pr-review-loop/skills/pr-review-loop`).
 
    ```bash
@@ -92,7 +94,7 @@ If either is missing, stop and tell the user with the install link from the erro
 
    All subsequent phases reference `$PACKET`, `$RUN_DIR`, `$HISTORY`, and the per-round `$ROUND_DIR` (defined at the top of each Phase 1 round) — never the old `/tmp/pr-review-packet` or `/tmp/pr-review-history.md` paths, and never a hand-invented run-dir pointer file (Phase 0 writes exactly one: `$PR_ROOT/current-run`).
 
-   **Cross-call state — variables do NOT survive between bash calls.** Every bash snippet below runs in a fresh shell. Loop state (`ITERATION`, `START_TIME`, `CONSECUTIVE_CLEAN_ROUNDS`, `SEVERITY_FLOOR_ACTIVE`, `SCOPED_NEXT`, `SCOPED_THIS`, `LAST_FIX_CLASS`, `LAST_FIX_BASE_SHA`, `ROUND_BASE_SHA`, `MARKER_CID`, paths like `$RUN_DIR`) lives in **your conversation**, not the shell — when you run a snippet, set every variable it reads at the top of that same bash call (re-inline the literal values you're tracking). Never paste a snippet whose variables you haven't defined in that call: an empty `$LAST_FIX_BASE_SHA` makes the scoped delta silently wrong, and an empty `$MARKER_CID` makes the marker deletion a silent no-op. The two values that must survive even a fresh conversation are persisted to disk: `$PR_ROOT/current-run` (this run's dir) and `$PR_ROOT/marker-cid` (written in Phase 0.5, read by Phase 5).
+   **Cross-call state — variables do NOT survive between bash calls.** Every bash snippet below runs in a fresh shell. Loop counters live in `$RUN_DIR/state` and are read back with `loop-state.sh get` (Step 4) — never carry them in your head. What does live in **your conversation** is the handful of paths and SHAs (`$SKILL_DIR`, `$RUN_DIR`, `$PACKET`, `$HISTORY`, `$ROUND_DIR`, `ROUND_BASE_SHA`, `SCOPED_THIS`): when you run a snippet, set every one it reads at the top of that same bash call (re-inline the literal values). Never paste a snippet whose variables you haven't defined in that call — an empty `$MARKER_CID` makes the marker deletion a silent no-op. The values that must survive even a fresh conversation are on disk: `$PR_ROOT/current-run` (this run's dir), `$PR_ROOT/marker-cid` (Phase 0.5 → Phase 5), and `$RUN_DIR/state` (every counter, plus `LAST_FIX_BASE_SHA` for the scoped delta).
 
 8. **Reconstruct history + read the fix budget (both PR-resident).** `$HISTORY` lives in `/tmp`, which dies on a container redeploy and is never shared between the laptop and the runner. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent. The same fetch also yields `PRIOR_ROUNDS`, the PR's lifetime round count, which is read on **every** run (not only when the local file is missing) because it is what the Phase 4 fix budget spends:
 
@@ -127,13 +129,22 @@ If either is missing, stop and tell the user with the install link from the erro
      fi
    fi
    # Rounds this PR has already had, across ALL prior runs — max of the local
-   # file and the PR-resident marker (see history-io.sh for why both exist and
-   # why max is the safe direction). 0 on a first run.
-   PRIOR_ROUNDS="$(printf '%s\n' "$body" | "$HISTORY_IO" rounds-total "$ROUNDS_FILE")"
-   echo "This PR has had $PRIOR_ROUNDS review round(s) before this run (budget: $MAX_PR_ROUNDS)."
+   # file and EVERY `pr-review-loop:rounds N` marker on the PR (see
+   # history-io.sh for why both exist and why max is the safe direction). Read
+   # from every comment, not just the summary: since 0.15.0 the progress
+   # comment carries the marker too, rewritten each round, so a run killed
+   # mid-loop (the CI cap, a crash) still leaves its rounds on the PR. 0 on a
+   # first run.
+   all_bodies="$(gh pr view "$PR_NUMBER" --json comments -q "$("$HISTORY_IO" rounds-filter)" 2>/dev/null || true)"
+   PRIOR_ROUNDS="$(printf '%s\n' "$all_bodies" | "$HISTORY_IO" rounds-total "$ROUNDS_FILE")"
+   echo "This PR has had $PRIOR_ROUNDS review round(s) before this run."
+
+   # Initialise the loop state (Step 4). Refuses to run twice in one run dir.
+   LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"
+   "$LOOP_STATE" init --state "$RUN_DIR/state" --rounds-file "$ROUNDS_FILE" --prior-rounds "$PRIOR_ROUNDS"
    ```
 
-   Carry `PRIOR_ROUNDS` in your conversation state like `ITERATION` — Phase 4 adds the two together, and Phase 5 persists the sum.
+   From here `ITERATION`, `PR_ROUNDS_TOTAL` and the rest are read with `"$LOOP_STATE" get --state "$RUN_DIR/state" KEY` whenever a snippet needs them. If `init` warns that the PR is already at or over `MAX_PR_ROUNDS`, tell the user now: the run will do one round and exit `FIX_BUDGET_EXHAUSTED`, which is the intended behaviour, not a bug.
 
    The PR is the durable copy; the local file is just the working copy. This makes pushback history a property of the PR, not the machine that happened to run the last loop.
 
@@ -188,6 +199,23 @@ After copying `$PACKET/CLAUDE.md`, read it and remove sections a code reviewer d
 
 If it exits non-zero, stop and surface its error — do not improvise the artifacts by hand (hand-generated packets are the drift class the scripts exist to kill).
 
+**PR-size gate (0.15.0) — before the marker is posted.** A packet above ~3,000 added lines does not converge: #1155 started at 3,900 and fed five reviewers something new for 24 rounds, and the runner's 75-minute cap gets about three rounds on a packet that size. Measure it, excluding artifacts a reviewer does not read (JSON, CSV, notebooks, lockfiles, snapshots, minified/generated code, binaries — `diff-size.sh` has the list; add project-specific patterns with `PR_SIZE_EXCLUDE='<glob>:<glob>'`):
+
+```bash
+"$SKILL_DIR/scripts/diff-size.sh" \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --base-ref "$(cat "$PACKET/base-ref.txt")" \
+  > "$RUN_DIR/size.txt"; SIZE_RC=$?
+cat "$RUN_DIR/size.txt"
+```
+
+Read `verdict=` from `$RUN_DIR/size.txt`:
+- `OK` — continue.
+- `WARN` (≥ 1,500 counted lines) — tell the user the PR is large for a loop, name the counted total and the top files, and continue. Report it in the wrap-up's Overview.
+- `STOP` (≥ 2,500 counted lines; exit code 3) — **do not review.** Post a wrap-up now (Phase 5 template, status `PR_TOO_LARGE`) giving the counted and excluded totals, the top files, and the recommendation: split the PR, or — if the count is inflated by a file type the exclusion list misses — re-run with `PR_SIZE_EXCLUDE='<glob>'`. Carry the `pr-review-loop:summary` and `pr-review-loop:rounds {PRIOR_ROUNDS}` markers as usual (CI's reconcile needs the summary marker). No in-flight marker has been posted yet, so there is nothing to remove; stop after the post.
+
+The gate measures `git diff --numstat` against the same base ref the packet used (`$PACKET/base-ref.txt`), so a stale local base branch cannot inflate it any more than it could inflate the packet.
+
 The packet is the agent interface. The assembled agent prompts (see `agent-prompts.md`, built by `build-prompts.sh`) tell agents to read from here — including `manifest.txt` for exact filenames — and forbid whole-file dumps.
 
 **Post the in-flight marker now** (deferred from Phase 0 Step 9 — the fail-prone setup above has succeeded, so from here every exit funnels through Phase 5, which deletes it).
@@ -215,6 +243,7 @@ printf '🔒 pr-review-loop running on `%s` (auto-removed at loop end) <!-- pr-r
 {
   echo "### Review in progress"
   echo "<!-- pr-review-loop:progress -->"
+  echo "<!-- pr-review-loop:rounds $PRIOR_ROUNDS -->"   # rewritten every round (Phase 2/3) so a killed run still counts
   echo
   echo "| Round | Agents | Findings | Fixed | Pushed back | Status |"
   echo "|:---:|---|:---:|:---:|:---:|---|"
@@ -224,7 +253,7 @@ printf '🔒 pr-review-loop running on `%s` (auto-removed at loop end) <!-- pr-r
   --body-file "$RUN_DIR/progress.md" --id-file "$PR_ROOT/progress-cid"
 ```
 
-If posting the progress comment fails, log a warning and continue — progress visibility is nice-to-have, not load-bearing. Set `PROGRESS_POSTED=1` on success, `0` on failure; every later edit checks this before calling `gh-io.sh edit-comment`.
+If posting the progress comment fails, log a warning and continue — progress visibility is nice-to-have, not load-bearing (though the `pr-review-loop:rounds` line it carries is what lets a run killed mid-loop still count toward the PR's budget; `$PR_ROOT/rounds-total` is the same-host backup). Set `PROGRESS_POSTED=1` on success, `0` on failure; every later edit checks this before calling `gh-io.sh edit-comment`.
 
 **From this moment, every exit routes through Phase 5** — not just the enumerated statuses, but *any* fatal error in Phases 1–4: a failed `refresh-packet.sh` or `build-prompts.sh`, an unfixable agent-crash environment, a rejected push, a gh outage. If you must stop for any reason, first run Phase 5's marker-removal step (post the wrap-up too if there's anything to report). Never end the turn with the marker still posted — an orphaned marker false-blocks every other host for 75 minutes.
 
@@ -235,9 +264,12 @@ If posting the progress comment fails, log a warning and continue — progress v
 Set up this round's directory and refresh the diff (Claude pushed fixes last round, so the diff has moved):
 
 ```bash
-ROUND_DIR="$RUN_DIR/round-$ITERATION"   # ITERATION starts at 0; incremented in Phase 4
+LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
+ITERATION="$("$LOOP_STATE" get --state "$STATE" ITERATION)"   # starts at 0; advanced by round-end in Phase 4
+ROUND_DIR="$RUN_DIR/round-$ITERATION"
 mkdir -p "$ROUND_DIR"
 ROUND_BASE_SHA="$(git rev-parse HEAD)"   # HEAD *before* this round's fixes — used to compute the delta for a later scoped verify
+[ "$ITERATION" -eq 0 ] && printf '%s\n' "$ROUND_BASE_SHA" > "$RUN_DIR/round-0-base-sha.txt"   # where the loop started; Phase 3's test budget measures from here
 # Refresh the packet so diff.patch / files/ / manifest.txt / diff-wide.patch /
 # changed-files.txt reflect the current PR head (Claude pushed fixes last round).
 "$SKILL_DIR/scripts/refresh-packet.sh" \
@@ -252,8 +284,10 @@ All prompt/review/log files for this round live in `$ROUND_DIR`, never in `$RUN_
 **Is this a scoped verify round?** Consume the flag Phase 4 set for this round, and if scoped, write the delta of the fix under verification (see "Scoped verify rounds" after Phase 4 for the full mechanics):
 
 ```bash
-SCOPED_THIS="${SCOPED_NEXT:-0}"; SCOPED_NEXT=0   # consume; each scoped round is decided fresh
+SCOPED_THIS="$("$LOOP_STATE" get --state "$STATE" SCOPED_NEXT)"   # set by round-end; each scoped round is decided fresh
 if [ "$SCOPED_THIS" = "1" ]; then
+  LAST_FIX_BASE_SHA="$("$LOOP_STATE" get --state "$STATE" LAST_FIX_BASE_SHA)"
+  [ -n "$LAST_FIX_BASE_SHA" ] || { echo "scoped round with no LAST_FIX_BASE_SHA recorded — Phase 3 step 7 must set it" >&2; exit 1; }
   git diff "$LAST_FIX_BASE_SHA"...HEAD > "$PACKET/delta.patch"   # just the tests/docs-only fix being verified
 fi
 ```
@@ -313,6 +347,8 @@ Then call the script once, listing exactly the roles Step 2 selected:
 ```bash
 ROLES="code-reviewer,test-analyzer,silent-failure-hunter,type-design-analyzer,failure-pattern-analyst"
 # add ,comment-analyzer / ,code-simplifier if selected; drop failure-pattern-analyst if no failure-patterns.md
+LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
+ITERATION="$("$LOOP_STATE" get --state "$STATE" ITERATION)"
 
 "$BUILD_PROMPTS" \
   --packet "$PACKET" \
@@ -320,10 +356,10 @@ ROLES="code-reviewer,test-analyzer,silent-failure-hunter,type-design-analyzer,fa
   --roles "$ROLES" \
   $( [ "$ITERATION" -gt 0 ] && printf -- '--history %s' "$HISTORY" ) \
   $( [ -f "$ROUND_DIR/context.txt" ] && printf -- '--context %s' "$ROUND_DIR/context.txt" ) \
-  $( [ "$SEVERITY_FLOOR_ACTIVE" = "1" ] && printf -- '--severity-floor' )
+  $( [ "$("$LOOP_STATE" get --state "$STATE" SEVERITY_FLOOR_ACTIVE)" = "1" ] && printf -- '--severity-floor' )
 ```
 
-`--history` only when `ITERATION > 0`; `--severity-floor` only when the rising floor is active (Phase 4 sets `SEVERITY_FLOOR_ACTIVE=1` when `CONSECUTIVE_CLEAN_ROUNDS >= 2`). The script writes `$ROUND_DIR/prompt-<role>.txt` for each role and exits non-zero if any fragment or role is missing — a half-assembled prompt never reaches an agent.
+`--history` only when `ITERATION > 0`; `--severity-floor` only when the rising floor is active (`round-end` sets `SEVERITY_FLOOR_ACTIVE=1` in the state file once `CONSECUTIVE_CLEAN_ROUNDS >= 2`). The script writes `$ROUND_DIR/prompt-<role>.txt` for each role and exits non-zero if any fragment or role is missing — a half-assembled prompt never reaches an agent.
 
 ### Step 4: Launch agents
 
@@ -332,7 +368,8 @@ ROLES="code-reviewer,test-analyzer,silent-failure-hunter,type-design-analyzer,fa
 Call the script once per round:
 
 ```bash
-SFH_EFFORT=$( [ "${CONSECUTIVE_CLEAN_ROUNDS:-0}" -ge 1 ] && echo medium || echo high )
+LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
+SFH_EFFORT="$("$LOOP_STATE" get --state "$STATE" SFH_EFFORT)"   # medium once CONSECUTIVE_CLEAN_ROUNDS ≥ 1, else high
 
 # ADDON_FLAGS: set from Step 2's judgment, e.g. ADDON_FLAGS="--add comment-analyzer"
 # or "--add comment-analyzer --add code-simplifier"; leave empty to add neither.
@@ -380,7 +417,28 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
 1. Collect findings from all agents this round.
 2. **Deduplicate**: if multiple agents flag the same `file:line` or the same underlying bug, merge into one. Log-analysis showed SFH + code-reviewer regularly double-count — aggressive dedup saves Claude effort in Phase 3.
-3. Categorize as CRITICAL / IMPORTANT / SUGGESTION.
+3. Categorize as CRITICAL / IMPORTANT / SUGGESTION. From here "findings" means CRITICAL + IMPORTANT after dedup; SUGGESTIONs never drive a round.
+
+3a. **Bucket every finding into exactly one of three, then ask the state script whether the round is worth fixing.**
+   - **substantive** — about the PR's own code, or a real bug that a fix introduced (a wrong output, a crash, a regression — with a concrete scenario).
+   - **fix-induced** — an edge case of code the *previous* round's fix added, that the fix "could also handle". Not a bug in the fix.
+   - **coverage-only** — asks for a test and names no bug in current code.
+
+   ```bash
+   LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
+   "$LOOP_STATE" triage --state "$STATE" --scoped "$SCOPED_THIS" \
+     --criticals {C} --findings {C+I} --fix-induced {F} --coverage-only {V}
+   ```
+
+   `FIX` → Phase 3 as normal. `EXIT NEEDS_HUMAN_REVIEW diminishing-returns` → **do not fix anything.** The round had no CRITICAL and every finding was fix-induced or coverage-only: that is the tail-chasing signature — each round hardening the previous round's hardening — and the loop's marginal finding is no longer worth a round (on #1155 the last three full rounds were exactly this). Record the round with no fix and go to Phase 5, listing the findings for the human to judge:
+
+   ```bash
+   "$LOOP_STATE" round-end --state "$STATE" --scoped "$SCOPED_THIS" \
+     --criticals 0 --findings {C+I} --fix-induced {F} --coverage-only {V} --pushed-back 0 \
+     --code-changed 0 --fix-class prod --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns
+   ```
+
+   `triage` never fires on round 0 (there is no previous fix to chase, and a coverage-only round 0 is answered by Phase 3's decline rules) nor on a scoped verify (its findings are about the delta by construction and cheap to address).
 
 **Quiet mode**: keep findings in memory; do not post. Report locally: "Round {N}: X critical, Y important, Z suggestions."
 
@@ -391,6 +449,9 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    ```bash
    # Rebuild the full table from conversation state (all rounds so far).
    # Each prior round's row is already known; this round adds a new one.
+   # Keep the two marker lines at the top: `pr-review-loop:progress`, then
+   # `pr-review-loop:rounds N` with N = "$LOOP_STATE" get ROUNDS_INCLUDING_CURRENT
+   # (this round's reviews have run, so it counts if the run dies now).
    # The current round's row:
    #   | {N} | {agent list} | {total findings} | — | — | ⏳ fixing… |
    # Prior rounds show their final resolved state:
@@ -409,6 +470,23 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 ## Phase 3: Claude responds
 
 1. For each finding: **Agree** (fix it), **Partially agree** (modified fix), or **Disagree** (pushback with written reasoning). A pushback must **cite the evidence that defeats the finding** — the specific code line, existing guard, type/constant, or project convention that makes it wrong or already-handled — not just assert judgment. If you can't point to concrete evidence, either fix it or ask, don't hand-wave. (These citations become the "All Prior Pushbacks" entries reviewers must clear a higher bar to re-raise, so they need to actually hold up.)
+
+   **Coverage-only findings are answered, not implemented, by default (0.15.0).** A finding that asks for a test and names no bug in current code needs no "defeating evidence" — the test genuinely does not exist, and that is not a reason to write it. Decline it, citing one of:
+   - (a) an existing test that already exercises the path — name it (`rg` the symbol in the test tree);
+   - (b) the repo's test conventions in the packet's CLAUDE.md / AGENTS.md (e.g. "verification tooling gets one smoke test", "the permanent suite stays small");
+   - (c) the loop's **test budget** — run
+
+     ```bash
+     "$SKILL_DIR/scripts/diff-size.sh" --repo "$(git rev-parse --show-toplevel)" \
+       --base-ref "$(cat "$PACKET/base-ref.txt")" --since "$(cat "$RUN_DIR/round-0-base-sha.txt")"
+     ```
+
+     and once it reports `test_budget=EXCEEDED` (the loop has added more test lines than production lines since round 0), every further coverage-only finding goes to `## Remaining Suggestions` with that reason;
+   - (d) it asks for a test of code the previous round's fix added — you already own that (below).
+
+   Write the decline into `$HISTORY` as a pushback like any other, so it is not re-raised. **Implement** a coverage finding only when it meets the test-analyzer's own bar: it names a bug in current code (then the bug is the fix and the test proves it), or it covers a CRITICAL fixed this loop that landed without one. On #1155 the fixer accepted 50 of 51 findings, because a coverage request could never be "defeated"; 1,825 test lines followed.
+
+   **When your fix adds a guard, its test goes in the same commit.** That is what makes "the previous round's fix has no test" a finding nobody can raise next round. One focused test per guard — not a parametrised sweep of every state the guard touches.
 2. After each file edit: run project-appropriate format+lint with auto-fix on the changed file (e.g. `ruff format <file> && ruff check <file> --fix`).
 3. Stage, commit with a descriptive message, and push:
    ```bash
@@ -483,7 +561,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    summary was ever posted.
 5. **Verbose mode**: post `CLAUDE:` response comment per `verbose-mode.md`. **Quiet mode**: report locally.
 6. **Update `$HISTORY`**: append this round's round-summary + resolved items to `## Recent Rounds` (trim to last 2); append each pushback to `## All Prior Pushbacks` (grows forever).
-6a. **Update the progress comment** (both modes). Rebuild `$RUN_DIR/progress.md` — this round's row now shows its final state (`{fixed}`, `{pushed_back}`, `✅`). If the loop will continue (Phase 4 decides), append a placeholder row for the next round (`| {N+1} | — | — | — | — | ⏳ reviewing… |`):
+6a. **Update the progress comment** (both modes). Rebuild `$RUN_DIR/progress.md` — this round's row now shows its final state (`{fixed}`, `{pushed_back}`, `✅`), and the `pr-review-loop:rounds` line still reads `ROUNDS_INCLUDING_CURRENT` (Phase 2 step 4). If the loop will continue (Phase 4 decides), append a placeholder row for the next round (`| {N+1} | — | — | — | — | ⏳ reviewing… |`):
 
    ```bash
    if [ "$PROGRESS_POSTED" = "1" ]; then
@@ -509,58 +587,73 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
    **Classify the final pushed state.** If you amend/force-push *after* this step (e.g. a late validation fix from step 4), re-run this classification — a `docs` round whose validation fix touched prod code must become `prod`, or Phase 4 would wrongly unlock a scoped verify for a production change.
 
+   Record where this round's fix started, for a later scoped delta (the class itself is passed to `round-end` in Phase 4):
+
+   ```bash
+   "$LOOP_STATE" set --state "$STATE" LAST_FIX_BASE_SHA "$ROUND_BASE_SHA"
+   ```
+
 ## Phase 4: Loop check
 
-> **Do not self-certify.** 80% of wrong CLEAN exits historically came from Claude declaring clean without Codex re-verifying the fixes.
+> **Do not self-certify.** 80% of wrong CLEAN exits historically came from Claude declaring clean without Codex re-verifying the fixes. And **do not self-decide**: the exit is computed by `loop-state.sh round-end` from the numbers you pass it. You report the round; the script rules.
 
-1. `ITERATION++`.
-2. If `$(( $(date +%s) - START_TIME )) >= TIMEOUT_SECONDS` → exit `TIMED_OUT`.
-3. If `ITERATION >= MAX_ITERATIONS` → exit `MAX_ITERATIONS_REACHED`.
-3a. **Fix budget.** `PR_ROUNDS_TOTAL = PRIOR_ROUNDS + ITERATION` (Phase 0 Step 8). If `PR_ROUNDS_TOTAL >= MAX_PR_ROUNDS` → exit `FIX_BUDGET_EXHAUSTED`. This is the only cap that survives a re-label, so it is the one that terminates a PR the loop cannot converge on; check it even when this run is only a round or two old.
-3b. If every agent this round was watchdog-killed (Phase 1 Step 4 systemic-degradation guard) → exit `CODEX_DEGRADED`.
-4. Check exit conditions (first match wins):
+1. **Report the round** — one call, every round, no exceptions:
 
-   **CLEAN** if any of:
-   - Claude made no code changes this round AND last Codex review had 0 CRITICAL (classic clean exit).
-   - **This round was a scoped verify (`SCOPED_THIS=1`) and Codex returned no findings** — the tests/docs-only delta is verified. Codex independently reviewed the delta, so this is a real clean, not self-certification.
-   - Last Codex review had 0 CRITICAL and every remaining IMPORTANT is either (a) in "All Prior Pushbacks" with Claude's rebuttal standing, or (b) Claude-declined-with-reasoning this round (**clean-on-pushback** — Claude is explicitly allowed to decline IMPORTANTs without a code change).
-   - `CONSECUTIVE_CLEAN_ROUNDS >= 3` (3 rounds without any CRITICAL is strong convergence).
+   ```bash
+   LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
+   "$LOOP_STATE" round-end --state "$STATE" \
+     --criticals {C} --findings {C+I} --fix-induced {F} --coverage-only {V} \
+     --pushed-back {P} --code-changed {0|1} --fix-class {tests|docs|prod} \
+     --scoped "$SCOPED_THIS" \
+     $( [ "${ALL_WATCHDOG_KILLED:-0}" = "1" ] && printf -- '--all-watchdog-killed' )
+   ```
 
-   **Full-validation gate on CLEAN (0.14.0).** Before any CLEAN exit, run the project's full validation set once on the final head — lint, build/typecheck and the full test suite — bounded and logged exactly as Phase 3 Step 4 describes. Skip it only if the last full run already ran on this exact head SHA. A failure is not CLEAN: fix it in Phase 3 terms, commit, push, and continue — the next round is a scoped verify or a full batch per `LAST_FIX_CLASS` as usual. Record which head the full run covered; Phase 5's Validation section reports it.
+   - `{C}` / `{C+I}`: CRITICAL and CRITICAL+IMPORTANT counts after Phase 2 dedup (SUGGESTIONs are not findings here).
+   - `{F}` / `{V}`: the Phase 2 buckets (disjoint; substantive is the remainder).
+   - `--code-changed`: 1 if this round pushed any commit, 0 if every finding was declined.
+   - `--fix-class`: Phase 3 step 7's `LAST_FIX_CLASS` (the script forces `prod` when nothing changed).
 
-   **Fix-induced findings get no special CLEAN** (changed in 0.7.0 — the old "fix-induced-only ⇒ CLEAN" bullet let just-pushed, never-reviewed fixes ship; that remains forbidden). When this round's findings only target code added since the *previous* review to fix prior findings (the tail-chasing signature), handle them like any other finding in Phase 3: fix, or decline with evidence. Declining them all with no code change routes through **clean-on-pushback** above — a legitimate CLEAN, the findings were answered. Fixing any of them routes through **Otherwise** below, and the normal `LAST_FIX_CLASS` gate decides whether the verification round is scoped (tests/docs fix) or full (prod fix). Either way, Codex reviews the final pushed state — never exit CLEAN with fixes no reviewer has seen.
+   The script advances every counter, persists the PR's lifetime round count to `$PR_ROOT/rounds-total`, and prints exactly one line.
 
-   What such a round *does* earn is a tick on `FIX_INDUCED_ROUNDS` (see **Otherwise**). Sustained tail-chasing is a signal about the PR, not about any one finding: the fixes keep being reasonable, so no amount of further looping resolves it. `FIX_BUDGET_EXHAUSTED` stops and asks a human — which is emphatically not the CLEAN that 0.7.0 removed.
+2. **`CONTINUE scoped=S severity_floor=F sfh_effort=E`** → go back to Phase 1. Phase 1 reads `SCOPED_NEXT`, `SEVERITY_FLOOR_ACTIVE` and `SFH_EFFORT` from the state file itself; the printed values are for your round summary. `scoped=1` means the next round is a **scoped verify** (see below): the review was CRITICAL-free and this round's fix touched only tests/docs.
 
-   **NEEDS_HUMAN_REVIEW** if:
-   - All issues from the previous round were pushbacks with no code changes AND reviewer is still surfacing the same disagreements (full author/reviewer standoff).
+3. **`EXIT CLEAN …`** → **full-validation gate first.** Before honouring a CLEAN, run the project's full validation set once on the final head — lint, build/typecheck and the full test suite — bounded and logged exactly as Phase 3 Step 4 describes. Skip it only if the last full run already ran on this exact head SHA. A failure is not CLEAN: fix it in Phase 3 terms, commit, push, then
 
-   **FIX_BUDGET_EXHAUSTED** if:
-   - `FIX_INDUCED_ROUNDS >= MAX_FIX_INDUCED_ROUNDS` — three consecutive rounds whose findings *all* targeted code added by the previous round's fix. This is the tail-chasing spiral: each round hardens the hardening, the findings stay individually valid, and the loop cannot reach any CLEAN condition because it legitimately changes code every round. Step 3a is the deterministic backstop that fires regardless; this fires *earlier*, when the signature is unambiguous.
+   ```bash
+   "$LOOP_STATE" validation-fix --state "$STATE" --fix-class {tests|docs|prod}
+   ```
 
-   Both routes exit **non-clean** — the PR is never marked ready and no claim is made that it is good (see Phase 5). That is what makes this safe where the removed 0.7.0 "fix-induced ⇒ CLEAN" bullet was not: the last round's fixes are still unreviewed, and the exit hands them to a human rather than shipping them.
+   and go back to Phase 1 — the next round is a scoped verify or a full batch per the class, and no review round was counted for the validation fix (the CLEAN the script printed is void; `validation-fix` clears it). If validation passes, record which head it covered for Phase 5 and exit CLEAN.
 
-   **Otherwise** (Claude made code changes, or a scoped round surfaced a finding — no exit condition met):
-   - **Fix-induced credit:** if **every** finding this round targeted code added since the previous review (the tail-chasing signature described above), increment `FIX_INDUCED_ROUNDS`; **any** finding against pre-existing code resets it to 0. Judge this per round, not per finding — one genuine finding about the original diff means the round is still doing real work.
-   - **Clean-round credit (full rounds only):** if this round was a full batch and its review had 0 CRITICAL, increment `CONSECUTIVE_CLEAN_ROUNDS`; a CRITICAL from *any* round (full or scoped) resets it to 0. A scoped round with only IMPORTANT/SUGGESTION findings leaves the counter unchanged — a 2-agent delta review is not full-batch evidence and must not earn severity-floor credit.
-   - If `CONSECUTIVE_CLEAN_ROUNDS >= 2`, **raise the severity floor** for the next *full* round (see Phase 1 Step 3 — agents get the 90%-confidence instruction).
-   - **Decide the next round's type** (`SCOPED_NEXT`):
-     - If THIS round was a scoped verify that surfaced any finding → **escalate**: `SCOPED_NEXT=0`, next round is a full batch. A scoped round never chains into another scoped round on a finding.
-     - Else if the latest review had 0 CRITICAL **and** `LAST_FIX_CLASS` ∈ {`tests`, `docs`} (this round's fix touched only tests/docs) → `SCOPED_NEXT=1`, next round is a **scoped verify**.
-     - Else → `SCOPED_NEXT=0`, next round is a full batch (any `prod` fix, or a round with a CRITICAL, always gets the full tier).
-   - Go back to **Phase 1**.
+4. **Any other `EXIT <STATUS> <reason>`** → Phase 5 with that status. What the script means by each:
 
-5. If exiting → Phase 5.
+   | Status | Fires when | Meaning |
+   |---|---|---|
+   | `CLEAN` | no code change this round and 0 CRITICAL | Classic clean, a scoped verify that found nothing, and clean-on-pushback (Claude declined every remaining IMPORTANT with reasoning) are all this one rule. |
+   | `NEEDS_HUMAN_REVIEW critical-declined` | no code change and a CRITICAL was declined | A standoff on a CRITICAL is a human's call, not another identical round. |
+   | `NEEDS_HUMAN_REVIEW diminishing-returns` | forced by Phase 2 triage | 0 CRITICAL and every finding fix-induced or coverage-only. Listed for the human, unfixed. |
+   | `CODEX_DEGRADED` | every agent watchdog-killed | Systemic Codex stall (Phase 1 Step 4). |
+   | `TIMED_OUT` | `TIMEOUT_SECONDS` elapsed | Checked between rounds only. |
+   | `MAX_ITERATIONS_REACHED` | `ITERATION >= MAX_ITERATIONS` | This run is over. **Do not start another** — Phase 0 Step 5. |
+   | `FIX_BUDGET_EXHAUSTED pr-rounds …` | `PRIOR_ROUNDS + ITERATION >= MAX_PR_ROUNDS` | The PR's lifetime budget; survives re-labels by design. |
+   | `FIX_BUDGET_EXHAUSTED fix-induced …` | three consecutive rounds whose findings were all fix-induced/coverage-only | Backstop for the triage exit, in case triage was skipped. |
+
+   CLEAN sits above the caps in the script's order: a round that converged is CLEAN even if it was the last one the budget allowed.
+
+   **Fix-induced findings get no special CLEAN** (0.7.0, unchanged): a round that fixed anything is never CLEAN on its own say-so — Codex reviews the pushed state next round, scoped or full per `LAST_FIX_CLASS`. What 0.15.0 changed is that a round consisting *only* of such findings is no longer fixed at all (Phase 2 triage). **Removed in 0.15.0:** the "3 consecutive CRITICAL-free rounds ⇒ CLEAN" exit — it could fire on a round that changed code, shipping fixes no reviewer had seen. The streak still raises the severity floor (`≥ 2`) and drops the silent-failure-hunter to medium effort (`≥ 1`).
+
+   Once `round-end` has printed an `EXIT`, it refuses further calls for this run. That is deliberate.
 
 ### Scoped verify rounds
 
 **Why:** loops historically ended with a full 4-agent round that found nothing — pure token waste. When the previous full round was clean of CRITICALs and Claude's only response was a **tests-only or docs/comments-only** fix, a full re-review is overkill: that fix can't introduce a production regression, so verifying it with 2 agents on just the delta is enough. Production changes never qualify (Phase 3 classifies them `prod`), so a scoped round can certify CLEAN without risk of missing a production bug — this is why the tests/docs-only gate matters and must stay strict.
 
-**When:** Phase 4 sets `SCOPED_NEXT=1` iff the latest review had 0 CRITICAL and `LAST_FIX_CLASS` ∈ {`tests`, `docs`}. Phase 1 Step 0 consumes it into `SCOPED_THIS` and writes `$PACKET/delta.patch` (the fix under verification).
+**When:** `round-end` sets `SCOPED_NEXT=1` in the state file iff the latest review had 0 CRITICAL and `LAST_FIX_CLASS` ∈ {`tests`, `docs`}. Phase 1 Step 0 reads it into `SCOPED_THIS` and writes `$PACKET/delta.patch` from the recorded `LAST_FIX_BASE_SHA`.
 
 **How a scoped round differs (Phase 1 Steps 2–4):**
 - **Step 2 — agents:** `code-reviewer` plus the persona that owns the fix's domain, derived from `LAST_FIX_CLASS` — no core tier. **Use this `SCOPED_ROLES` in both Step 3 and Step 4** (don't hardcode `test-analyzer`, or a `docs` fix gets the wrong reviewer):
   ```bash
+  LAST_FIX_CLASS="$("$LOOP_STATE" get --state "$STATE" LAST_FIX_CLASS)"
   case "$LAST_FIX_CLASS" in
     tests) SCOPED_ROLES="code-reviewer,test-analyzer" ;;
     docs)  SCOPED_ROLES="code-reviewer,comment-analyzer" ;;
@@ -603,7 +696,9 @@ CLAUDE: Automated Review Summary
 - Iterations: {N} rounds this run ({M} Codex + {N-M} Claude fix); {PR_ROUNDS_TOTAL} for this PR across all runs
 - Duration: {minutes}m
 - Agents used: {list}
-- Status: {CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
+- Status: {CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | PR_TOO_LARGE | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED} ({reason from round-end, e.g. diminishing-returns})
+- Size: {counted} counted added lines ({excluded} excluded as artifacts) — {OK | WARN | STOP}
+- Test budget: the loop added {T} test lines against {P} production lines — {OK | EXCEEDED}
 
 ## Issues Fixed
 - [severity] `file:line` — {original issue} → Fixed: {how}
@@ -654,6 +749,18 @@ This exit means "the loop stopped being productive", **not** "the PR is fine" an
 
 Re-labelling after this exit *will* immediately re-exhaust the budget (the count is PR-resident by design). That is intentional: the next loop should start only after a human has changed something — split the PR, or reset the counter deliberately by editing the `pr-review-loop:rounds` marker on the newest summary comment and deleting `$PR_ROOT/rounds-total`.
 
+### Reporting a `NEEDS_HUMAN_REVIEW` (diminishing-returns) exit
+
+The loop stopped because the round's findings were all fix-induced or coverage-only with no CRITICAL — the marginal round would have hardened the previous round's hardening. Nothing from that round was fixed; that is the point.
+
+- **List the round's findings verbatim under `## Remaining Suggestions`**, each tagged `[fix-induced]` or `[coverage-only]`, with the agent and `file:line`. The human decides which, if any, are worth a commit.
+- **Say what converged.** The last fixes *were* reviewed (this round reviewed them and found only these), so unlike `FIX_BUDGET_EXHAUSTED` there is no unreviewed state. Say so.
+- **Recommend, don't decide.** Typically: merge as-is, or hand-pick one or two of the listed items. Do not mark ready, do not re-run the loop.
+
+### Reporting a `PR_TOO_LARGE` exit
+
+No review ran. Give the counted and excluded line totals, the top files from `$RUN_DIR/size.txt`, and the two ways forward: split the PR (name a seam if one is visible in the top files), or re-run with `PR_SIZE_EXCLUDE='<glob>'` if a file type the exclusion list misses inflated the count. Carry the `pr-review-loop:summary` marker and `pr-review-loop:rounds {PRIOR_ROUNDS}` (no rounds were added). Do not mark ready.
+
 ### Mark ready for review (CLEAN exits only)
 
 After posting the wrap-up, **if and only if the loop exited `CLEAN`** (Phase 4), mark the PR ready for review when it is currently a draft:
@@ -664,7 +771,7 @@ if [ "$(gh pr view "$PR_NUMBER" --json isDraft -q .isDraft)" = "true" ]; then
 fi
 ```
 
-Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop so CI doesn't run on every review-loop push, then defer the single CI run to `ready_for_review`. Marking ready here fires that end-of-cycle CI. On repos that don't use draft-first the PR isn't a draft, so this is a no-op. **Never mark ready on a non-CLEAN exit** (`NEEDS_HUMAN_REVIEW` / `FIX_BUDGET_EXHAUSTED` / `TIMED_OUT` / `MAX_ITERATIONS_REACHED` / `CODEX_DEGRADED`) — an unconverged PR must stay a draft and out of CI.
+Rationale: some repos (e.g. f1-predictions) keep PRs in draft *during* the loop so CI doesn't run on every review-loop push, then defer the single CI run to `ready_for_review`. Marking ready here fires that end-of-cycle CI. On repos that don't use draft-first the PR isn't a draft, so this is a no-op. **Never mark ready on a non-CLEAN exit** (`NEEDS_HUMAN_REVIEW` / `FIX_BUDGET_EXHAUSTED` / `PR_TOO_LARGE` / `TIMED_OUT` / `MAX_ITERATIONS_REACHED` / `CODEX_DEGRADED`) — an unconverged PR must stay a draft and out of CI.
 
 ### Remove the progress comment
 
@@ -704,7 +811,9 @@ fi
 
 ## Bundled files
 
-- `scripts/refresh-packet.sh` — resolves the base ref and (re)generates the packet's diff artifacts (Phase 0.5, Phase 1 Step 0)
+- `scripts/refresh-packet.sh` — resolves the base ref and (re)generates the packet's diff artifacts, including `base-ref.txt` (Phase 0.5, Phase 1 Step 0)
+- `scripts/diff-size.sh` — the PR-size gate (warn 1,500 / stop 2,500 counted added lines, artifacts excluded) and the loop's test budget (`--since`) (Phase 0.5, Phase 3)
+- `scripts/loop-state.sh` — every loop counter and the exit decision: `init`, `get`, `set`, `triage`, `round-end`, `validation-fix` (Phase 0, 1, 2, 3, 4); tested by `selftest.sh`
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
 - `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
 - `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
