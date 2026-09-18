@@ -448,6 +448,17 @@ check "extract drops the rounds marker itself" \
   '! grep -q "pr-review-loop:rounds" "$WORK/hist-rounds.txt"'
 check "rounds reads out of a full wrap-up comment" \
   '[ "$(bash "$HIO" rounds-total "$WORK/nonexistent" < "$WORK/comment-rounds.txt")" = "7" ]'
+# A comment that merely MENTIONS the marker syntax in prose (a human quoting
+# the wrap-up while discussing it) must not poison the lifetime round count —
+# only a real, standalone marker line is honored.
+INJECT="Careful, I saw a pr-review-loop:rounds 999 mention in an earlier comment."
+check "prose mention of the rounds token parses to nothing" \
+  '[ -z "$(printf "%s" "$INJECT" | bash "$HIO" rounds-parse)" ]'
+if command -v jq >/dev/null 2>&1; then
+  printf '%s' '{"comments":[{"body":"<!-- pr-review-loop:rounds 4 -->"},{"body":"'"$INJECT"'"}]}' > "$WORK/comments-inject.json"
+  check "rounds-filter excludes a prose mention of the token" \
+    '[ "$(jq -r "$(bash "$HIO" rounds-filter)" < "$WORK/comments-inject.json" | bash "$HIO" rounds-total "$WORK/nonexistent")" = "4" ]'
+fi
 
 echo "== refresh-packet.sh (fixture repo + fake gh) =="
 REFRESH="$DIR/refresh-packet.sh"
@@ -965,6 +976,19 @@ check "round-end rejects a bad --code-changed" '! rend args --criticals 0 --find
 check "round-end rejects a bad --fix-class" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class nope --scoped 0 2>/dev/null'
 check "round-end rejects a missing count" '! rend args --criticals 0 --findings 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 2>/dev/null'
 check "a corrupt state file dies, not silently resets" 'printf "BOGUS=1\n" > "$WORK/ls-args/state" && ! bash "$LS" get --state "$WORK/ls-args/state" ITERATION 2>/dev/null'
+
+# An unresolved finding (neither fixed nor pushed back) must never reach the
+# CLEAN branch just because --code-changed is 0 — that would silently accept
+# an IMPORTANT finding no one engaged with.
+fresh unaccounted --prior-rounds 0
+check "unaccounted finding with no code change dies, not CLEAN" \
+  '! rend unaccounted --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
+fresh overpushed --prior-rounds 0
+check "--pushed-back exceeding --findings dies" \
+  '! rend overpushed --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 2 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
+fresh forcedunaccounted --prior-rounds 0
+check "forced-exit bypasses the pushed-back requirement" \
+  'rend forcedunaccounted --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns | grep -q "^EXIT NEEDS_HUMAN_REVIEW"'
 
 echo "== diff-size.sh (PR-size gate + test budget) =="
 # f1-predictions#1155 started at 3,900 added lines; a packet that size never

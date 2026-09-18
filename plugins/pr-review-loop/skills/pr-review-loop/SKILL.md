@@ -135,7 +135,14 @@ If either is missing, stop and tell the user with the install link from the erro
    # comment carries the marker too, rewritten each round, so a run killed
    # mid-loop (the CI cap, a crash) still leaves its rounds on the PR. 0 on a
    # first run.
-   all_bodies="$(gh pr view "$PR_NUMBER" --json comments -q "$("$HISTORY_IO" rounds-filter)" 2>/dev/null || true)"
+   # Same fail-visible handling as the history fetch above — this counter is
+   # the PR-resident half of the fix budget, so a fetch failure that silently
+   # read as "no markers" would zero out the only source a fresh runner has
+   # (no local $ROUNDS_FILE yet) and hand back a budget the PR already spent.
+   if ! all_bodies="$(gh pr view "$PR_NUMBER" --json comments -q "$("$HISTORY_IO" rounds-filter)" 2>&1)"; then
+     echo "Warning: couldn't read PR comments to reconstruct the round budget ($all_bodies) — falling back to the local rounds file only." >&2
+     all_bodies=""
+   fi
    PRIOR_ROUNDS="$(printf '%s\n' "$all_bodies" | "$HISTORY_IO" rounds-total "$ROUNDS_FILE")"
    echo "This PR has had $PRIOR_ROUNDS review round(s) before this run."
 

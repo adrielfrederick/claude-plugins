@@ -56,7 +56,12 @@ parse_epoch() { sed -n 's/.*pr-review-loop:running [^ ]* \([0-9][0-9]*\).*/\1/p'
 # mid-loop still leaves its round count on the PR — the CI run on
 # f1-predictions#1155 completed 7 rounds, posted no summary, and the next run
 # started from PRIOR_ROUNDS=0. Phase 0 now feeds every comment body in at once.
-parse_rounds() { sed -n 's/.*pr-review-loop:rounds \([0-9][0-9]*\).*/\1/p' | sort -n | tail -1; }
+# Anchored to a full, standalone marker line (line START through the closing
+# `-->`) — same discipline as the history opener/closer above. Unanchored
+# `.*token.*` would let ANY comment that merely mentions the literal string
+# "pr-review-loop:rounds N" in prose (a human quoting a wrap-up while asking a
+# question) poison this load-bearing budget counter.
+parse_rounds() { sed -n 's/^<!-- pr-review-loop:rounds \([0-9][0-9]*\) -->.*/\1/p' | sort -n | tail -1; }
 
 # Digits-only, bounded read. Anything else in the file (empty, a stray newline,
 # a half-written value from a killed run) reads as 0 rather than erroring — a
@@ -106,7 +111,11 @@ case "${1:-}" in
     ;;
   rounds-parse) parse_rounds ;;
   rounds-filter)
-    printf '%s' '[.comments[].body] | join("\n")'
+    # Same anchoring discipline as history-filter: only comment bodies that
+    # actually HOLD a standalone rounds-marker line (line start, or right after
+    # a newline) are joined in — a comment that merely mentions the token in
+    # prose is excluded before it ever reaches parse_rounds.
+    printf '%s' '[.comments[].body | select(startswith("<!-- pr-review-loop:rounds ") or contains("\n<!-- pr-review-loop:rounds "))] | join("\n")'
     ;;
   rounds-total)
     # stdin is optional here: on the fast path (local file present) the caller

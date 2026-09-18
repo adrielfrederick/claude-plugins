@@ -246,6 +246,17 @@ case "$cmd" in
     case "$SCOPED" in 0|1) ;; *) die "--scoped must be 0 or 1";; esac
     # An empty change set must not vacuously count as "all tests" (SKILL.md Phase 3 step 7).
     if [ "$CODE" = "0" ] && [ "$CLASS" != "prod" ]; then CLASS=prod; fi
+    [ "$PUSHED" -le "$FIND" ] || die "--pushed-back ($PUSHED) exceeds --findings ($FIND): the counts are inconsistent"
+    # No code changed this round ⇒ nothing was fixed, so every finding must be
+    # accounted for by an explicit pushback (SKILL.md Phase 3: agree/partially
+    # agree/disagree — no finding is left silently unaddressed). Without this,
+    # --code-changed 0 --criticals 0 alone reaches the CLEAN branch below even
+    # when an IMPORTANT finding was never fixed OR pushed back. Skipped when
+    # --forced-exit is set: triage's diminishing-returns exit hands findings to
+    # a human without either a fix or a written pushback, by design.
+    if [ -z "$FORCED" ] && [ "$CODE" = "0" ] && [ "$PUSHED" -lt "$FIND" ]; then
+      die "--code-changed 0 but only $PUSHED of $FIND findings were pushed back — every finding must be fixed or explicitly declined with reasoning before round-end"
+    fi
 
     # ── advance the counters ──
     it=$(( $(sget ITERATION) + 1 )); sset ITERATION "$it"
