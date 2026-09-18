@@ -105,6 +105,20 @@ require_codex_version() {
   fi
 }
 
+# Session persistence. `codex exec` writes a full rollout transcript of every
+# agent run under $CODEX_HOME/sessions/ (plus thread-history rows in its SQLite
+# state) and never prunes them. On the always-on runner that volume went from
+# 0.9 GB to 2.6 GB in a month (5,440 rollouts by 2026-09-17, per-session size
+# tripling after the codex 0.153 rebuild). Reviewers are stateless one-shots
+# whose only outputs are the -o review file and the log in $RUN_DIR, so nothing
+# reads those rollouts — run ephemeral wherever the CLI supports it. Probed
+# rather than assumed so a laptop CLI that clears the gpt-5.6 floor but lacks
+# the flag still launches.
+CODEX_EPHEMERAL=""
+if codex exec --help 2>/dev/null | grep -q -- '--ephemeral'; then
+  CODEX_EPHEMERAL="--ephemeral"
+fi
+
 CORE=(code-reviewer test-analyzer silent-failure-hunter type-design-analyzer)
 
 # ── --only: run EXACTLY the named roles (scoped verify rounds). This is the one
@@ -204,8 +218,8 @@ launch() {
     sandbox="--dangerously-bypass-approvals-and-sandbox"
   fi
 
-  # shellcheck disable=SC2086  # sandbox/model are intentional multi-token flags
-  codex exec $sandbox $model \
+  # shellcheck disable=SC2086  # sandbox/model/ephemeral are intentional multi-token flags
+  codex exec $CODEX_EPHEMERAL $sandbox $model \
     -c model_reasoning_summary=concise \
     -c model_reasoning_effort="$effort" \
     -C "$REPO" \
@@ -256,7 +270,7 @@ launch() {
   # write the marker AFTER the classification check (a TOCTOU that would leave a
   # spurious kill record on a completed review, dropping its findings).
   AGENT_PIDS+=("$role:$apid:$wpid")
-  echo "launched $role (sandbox='$sandbox' model='${model:-default}' effort='$effort') pid=$apid"
+  echo "launched $role (sandbox='$sandbox' model='${model:-default}' effort='$effort' ephemeral='${CODEX_EPHEMERAL:+yes}${CODEX_EPHEMERAL:-no}') pid=$apid"
 }
 
 AGENT_PIDS=()

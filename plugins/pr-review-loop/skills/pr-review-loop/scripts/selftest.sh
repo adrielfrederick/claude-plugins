@@ -153,6 +153,52 @@ out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="$
 FAKE
 chmod +x "$BIN/codex"
 
+echo "== --ephemeral (probed per CLI) =="
+# codex exec persists a rollout per agent under $CODEX_HOME/sessions and never
+# prunes them — the runner's volume filled with them (0.15.1). Reviewers are
+# one-shots, so the launcher passes --ephemeral, but only when `codex exec
+# --help` advertises it: an older laptop CLI that clears the gpt-5.6 floor must
+# keep launching, just persistently. The fakes below log their argv so the
+# check is on what codex was actually invoked with.
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "exec" ] && [ "${2:-}" = "--help" ] && { echo "      --ephemeral  Run without persisting session files to disk"; exit 0; }
+printf '%s\n' "$@" >> "$CODEX_ARGS_LOG"
+out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
+[ -n "$out" ] && echo "No issues found." > "$out"
+FAKE
+chmod +x "$BIN/codex"
+RDe="$WORK/run-ephemeral"; mkdir -p "$RDe"; mkprompts "$RDe" "${ALL[@]}"
+CODEX_ARGS_LOG="$RDe/args.log" PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=30 \
+  bash "$LAUNCH" --run-dir "$RDe" --repo "$WORK" --only code-reviewer >"$RDe/launch.out" 2>&1
+check "ephemeral: passed when the CLI advertises it"  'grep -qx -- "--ephemeral" "$RDe/args.log"'
+check "ephemeral: agent still ran"                    '[ -f "$RDe/review-code-reviewer.txt" ]'
+check "ephemeral: launch line reports it"             'grep -q "ephemeral=.yes." "$RDe/launch.out"'
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "exec" ] && [ "${2:-}" = "--help" ] && { echo "      --json  Print events to stdout as JSONL"; exit 0; }
+printf '%s\n' "$@" >> "$CODEX_ARGS_LOG"
+out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
+[ -n "$out" ] && echo "No issues found." > "$out"
+FAKE
+chmod +x "$BIN/codex"
+RDn="$WORK/run-noephemeral"; mkdir -p "$RDn"; mkprompts "$RDn" "${ALL[@]}"
+CODEX_ARGS_LOG="$RDn/args.log" PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=30 \
+  bash "$LAUNCH" --run-dir "$RDn" --repo "$WORK" --only code-reviewer >"$RDn/launch.out" 2>&1
+check "ephemeral: omitted when the CLI lacks it"      '! grep -qx -- "--ephemeral" "$RDn/args.log"'
+check "ephemeral: older CLI still launches"           '[ -f "$RDn/review-code-reviewer.txt" ]'
+check "ephemeral: launch line reports no"             'grep -q "ephemeral=.no." "$RDn/launch.out"'
+# Restore the current-codex fake the sections below assume.
+cat > "$BIN/codex" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
+[ -n "$out" ] && echo "No issues found." > "$out"
+FAKE
+chmod +x "$BIN/codex"
+
 # refuse to skip a core agent
 RDx="$WORK/run-core"; mkdir -p "$RDx"; mkprompts "$RDx" "${ALL[@]}"
 PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDx" --repo "$WORK" --skip silent-failure-hunter >/dev/null 2>&1
