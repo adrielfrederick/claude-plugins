@@ -919,7 +919,7 @@ tri() { bash "$LS" triage --state "$ST/state" "$@"; }
 check "triage never exits on round 0"    '[ "$(tri --criticals 0 --findings 2 --fix-induced 0 --coverage-only 2)" = "FIX" ]'
 check "triage rejects buckets > findings" '! tri --criticals 0 --findings 1 --fix-induced 1 --coverage-only 1 2>/dev/null'
 re() { bash "$LS" round-end --state "$ST/state" "$@"; }
-out="$(re --criticals 1 --findings 3 --fix-induced 0 --coverage-only 1 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0)"
+out="$(re --criticals 1 --findings 3 --fix-induced 0 --coverage-only 1 --pushed-back 0 --fixed 3 --code-changed 1 --fix-class prod --scoped 0)"
 check "round 0 with a CRITICAL continues full" '[ "$out" = "CONTINUE scoped=0 severity_floor=0 sfh_effort=high" ]'
 check "round-end advances ITERATION"     '[ "$(bash "$LS" get --state "$ST/state" ITERATION)" = "1" ]'
 check "round-end persists prior+iter to the rounds file" '[ "$(cat "$RF")" = "3" ]'
@@ -929,66 +929,87 @@ check "triage: a CRITICAL keeps fixing"  '[ "$(tri --criticals 1 --findings 1 --
 check "triage: a scoped round keeps fixing" '[ "$(tri --scoped 1 --criticals 0 --findings 1 --fix-induced 1 --coverage-only 0)" = "FIX" ]'
 check "triage: zero findings is FIX (nothing to do)" '[ "$(tri --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0)" = "FIX" ]'
 # ── round-end (Phase 4): next-round type, streaks, floor ──
-out="$(re --criticals 0 --findings 2 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class tests --scoped 0)"
+out="$(re --criticals 0 --findings 2 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 2 --code-changed 1 --fix-class tests --scoped 0)"
 check "tests-only fix after a clean review earns a scoped verify" '[ "$out" = "CONTINUE scoped=1 severity_floor=0 sfh_effort=medium" ]'
-out="$(re --criticals 0 --findings 1 --fix-induced 1 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 1)"
+out="$(re --criticals 0 --findings 1 --fix-induced 1 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 1)"
 check "scoped round with a finding escalates to a full batch" 'printf "%s" "$out" | grep -q "^CONTINUE scoped=0"'
 check "scoped round does not earn severity-floor credit" 'printf "%s" "$out" | grep -q "severity_floor=0"'
-out="$(re --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0)"
+out="$(re --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0)"
 check "second clean full round raises the severity floor" 'printf "%s" "$out" | grep -q "severity_floor=1"'
 check "a substantive finding resets the fix-induced streak" '[ "$(bash "$LS" get --state "$ST/state" FIX_INDUCED_ROUNDS)" = "0" ]'
-out="$(re --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 1 --code-changed 0 --fix-class tests --scoped 0)"
+out="$(re --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 1 --fixed 0 --code-changed 0 --fix-class tests --scoped 0)"
 check "no code change + 0 CRITICAL is CLEAN (clean-on-pushback)" 'printf "%s" "$out" | grep -q "^EXIT CLEAN"'
 check "an empty change set is forced to prod class" '[ "$(bash "$LS" get --state "$ST/state" LAST_FIX_CLASS)" = "prod" ]'
-check "round-end refuses to run after an exit" '! re --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
+check "round-end refuses to run after an exit" '! re --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
 # validation-fix: the CLEAN gate failed, a fix was pushed — void the CLEAN, count nothing
 out="$(bash "$LS" validation-fix --state "$ST/state" --fix-class tests)"
 check "validation-fix sets scoped next without counting a round" '[ "$out" = "CONTINUE scoped=1 severity_floor=1 sfh_effort=medium" ] && [ "$(bash "$LS" get --state "$ST/state" ITERATION)" = "5" ]'
 check "validation-fix voids the CLEAN"   '[ -z "$(bash "$LS" get --state "$ST/state" EXIT_STATUS)" ]'
-check "round-end runs again after validation-fix" 're --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 1 | grep -q "^EXIT CLEAN"'
+check "round-end runs again after validation-fix" 're --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 1 | grep -q "^EXIT CLEAN"'
 # ── every exit status, each on a fresh state ──
 fresh() { rm -rf "$WORK/ls-$1"; mkdir -p "$WORK/ls-$1"; bash "$LS" init --state "$WORK/ls-$1/state" --rounds-file "$WORK/ls-$1/rounds" "${@:2}" >/dev/null 2>&1; }
 rend() { bash "$LS" round-end --state "$WORK/ls-$1/state" "${@:2}"; }
 fresh standoff --prior-rounds 0
-check "declined CRITICAL with no change → NEEDS_HUMAN_REVIEW" 'rend standoff --criticals 1 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 1 --code-changed 0 --fix-class prod --scoped 0 | grep -q "^EXIT NEEDS_HUMAN_REVIEW critical-declined"'
+check "declined CRITICAL with no change → NEEDS_HUMAN_REVIEW" 'rend standoff --criticals 1 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 1 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 | grep -q "^EXIT NEEDS_HUMAN_REVIEW critical-declined"'
 check "validation-fix refuses after a non-CLEAN exit" '! bash "$LS" validation-fix --state "$WORK/ls-standoff/state" --fix-class tests >/dev/null 2>&1'
 fresh maxit --prior-rounds 0 --max-iterations 2
-rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
-check "per-run cap → MAX_ITERATIONS_REACHED" 'rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT MAX_ITERATIONS_REACHED"'
+rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
+check "per-run cap → MAX_ITERATIONS_REACHED" 'rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT MAX_ITERATIONS_REACHED"'
 fresh budget --prior-rounds 11 --max-pr-rounds 12
-check "per-PR budget counts prior rounds → FIX_BUDGET_EXHAUSTED" 'rend budget --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT FIX_BUDGET_EXHAUSTED pr-rounds"'
+check "per-PR budget counts prior rounds → FIX_BUDGET_EXHAUSTED" 'rend budget --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT FIX_BUDGET_EXHAUSTED pr-rounds"'
 check "budget exit still persists the lifetime count" '[ "$(cat "$WORK/ls-budget/rounds")" = "12" ]'
 fresh cleanlast --prior-rounds 11 --max-pr-rounds 12
-check "CLEAN outranks the budget on the last allowed round" 'rend cleanlast --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 | grep -q "^EXIT CLEAN"'
+check "CLEAN outranks the budget on the last allowed round" 'rend cleanlast --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 | grep -q "^EXIT CLEAN"'
 fresh streak --prior-rounds 0 --max-fix-induced 2
-rend streak --criticals 0 --findings 1 --fix-induced 0 --coverage-only 1 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
-check "fix-induced streak backstop → FIX_BUDGET_EXHAUSTED" 'rend streak --criticals 0 --findings 2 --fix-induced 1 --coverage-only 1 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT FIX_BUDGET_EXHAUSTED fix-induced"'
+rend streak --criticals 0 --findings 1 --fix-induced 0 --coverage-only 1 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
+check "fix-induced streak backstop → FIX_BUDGET_EXHAUSTED" 'rend streak --criticals 0 --findings 2 --fix-induced 1 --coverage-only 1 --pushed-back 0 --fixed 2 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT FIX_BUDGET_EXHAUSTED fix-induced"'
 fresh timed --prior-rounds 0 --timeout 1
 sleep 2
-check "wall clock → TIMED_OUT"           'rend timed --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT TIMED_OUT"'
+check "wall clock → TIMED_OUT"           'rend timed --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT TIMED_OUT"'
 fresh wdk --prior-rounds 0
-check "all agents watchdog-killed → CODEX_DEGRADED" 'rend wdk --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 --all-watchdog-killed | grep -q "^EXIT CODEX_DEGRADED"'
+check "all agents watchdog-killed → CODEX_DEGRADED" 'rend wdk --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 --all-watchdog-killed | grep -q "^EXIT CODEX_DEGRADED"'
 fresh forced --prior-rounds 4
-check "forced exit is echoed verbatim"   '[ "$(rend forced --criticals 0 --findings 2 --fix-induced 1 --coverage-only 1 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns)" = "EXIT NEEDS_HUMAN_REVIEW diminishing-returns" ]'
+check "forced exit is echoed verbatim"   '[ "$(rend forced --criticals 0 --findings 2 --fix-induced 1 --coverage-only 1 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns)" = "EXIT NEEDS_HUMAN_REVIEW diminishing-returns" ]'
 check "forced exit still counts the round" '[ "$(cat "$WORK/ls-forced/rounds")" = "5" ]'
 fresh args --prior-rounds 0
-check "round-end rejects a bad --code-changed" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed yes --fix-class prod --scoped 0 2>/dev/null'
-check "round-end rejects a bad --fix-class" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 1 --fix-class nope --scoped 0 2>/dev/null'
+check "round-end rejects a bad --code-changed" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed yes --fix-class prod --scoped 0 2>/dev/null'
+check "round-end rejects a bad --fix-class" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 1 --fix-class nope --scoped 0 2>/dev/null'
 check "round-end rejects a missing count" '! rend args --criticals 0 --findings 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 2>/dev/null'
 check "a corrupt state file dies, not silently resets" 'printf "BOGUS=1\n" > "$WORK/ls-args/state" && ! bash "$LS" get --state "$WORK/ls-args/state" ITERATION 2>/dev/null'
+
+# save()'s write must not be swallowed: no caller checks its exit status, so a
+# failure that used to fall through silently would let round-end (or `set`)
+# print a verdict while the counters it just decided on were never persisted.
+fresh savefail --prior-rounds 0
+chmod 555 "$WORK/ls-savefail"
+check "save failure dies instead of silently dropping state" \
+  '! bash "$LS" set --state "$WORK/ls-savefail/state" LAST_FIX_BASE_SHA abc1234 2>/dev/null'
+chmod 755 "$WORK/ls-savefail"
 
 # An unresolved finding (neither fixed nor pushed back) must never reach the
 # CLEAN branch just because --code-changed is 0 — that would silently accept
 # an IMPORTANT finding no one engaged with.
 fresh unaccounted --prior-rounds 0
 check "unaccounted finding with no code change dies, not CLEAN" \
-  '! rend unaccounted --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
+  '! rend unaccounted --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
 fresh overpushed --prior-rounds 0
 check "--pushed-back exceeding --findings dies" \
-  '! rend overpushed --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 2 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
+  '! rend overpushed --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 2 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
 fresh forcedunaccounted --prior-rounds 0
 check "forced-exit bypasses the pushed-back requirement" \
-  'rend forcedunaccounted --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --code-changed 0 --fix-class prod --scoped 0 --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns | grep -q "^EXIT NEEDS_HUMAN_REVIEW"'
+  'rend forcedunaccounted --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns | grep -q "^EXIT NEEDS_HUMAN_REVIEW"'
+# A round CAN change code and still silently drop a finding: fixing one of two
+# IMPORTANTs and reporting neither a matching --fixed nor a --pushed-back for
+# the second must be rejected too, not just the --code-changed 0 case above.
+fresh partial --prior-rounds 0
+check "code-changed round accounting for only some findings dies" \
+  '! rend partial --criticals 0 --findings 2 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 2>/dev/null'
+fresh mixed --prior-rounds 0
+check "mixed fixed + pushed-back accounting for all findings succeeds" \
+  'rend mixed --criticals 0 --findings 2 --fix-induced 0 --coverage-only 0 --pushed-back 1 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^CONTINUE"'
+fresh fixedwithoutcode --prior-rounds 0
+check "--fixed > 0 with --code-changed 0 dies" \
+  '! rend fixedwithoutcode --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
 
 echo "== diff-size.sh (PR-size gate + test budget) =="
 # f1-predictions#1155 started at 3,900 added lines; a packet that size never
@@ -1044,6 +1065,20 @@ check "size: unresolvable base dies"           '! bash "$DS" --repo "$FS" --base
 check "size: unresolvable --since dies"        '! bash "$DS" --repo "$FS" --base-ref main --since nope 2>/dev/null'
 check "size: non-numeric threshold dies"       '! bash "$DS" --repo "$FS" --base-ref main --warn lots 2>/dev/null'
 check "size: not-a-repo dies"                  '! bash "$DS" --repo "$WORK" --base-ref main 2>/dev/null'
+# Both refs can resolve individually yet share no merge base (e.g. a shallow
+# checkout truncated past the divergence point) — `git diff A...B` then fails
+# outright rather than returning nothing. Feeding that failure straight into a
+# process substitution used to be invisible to the caller: the while-read loop
+# just saw zero lines and reported counted_added=0 / verdict=OK.
+UNREL="$WORK/fixture-unrelated"
+git init -q -b main "$UNREL" 2>/dev/null || { git init -q "$UNREL"; git -C "$UNREL" checkout -qb main; }
+git -C "$UNREL" config user.email t@t; git -C "$UNREL" config user.name t
+printf 'a\n' > "$UNREL/a.txt"; git -C "$UNREL" add -A; git -C "$UNREL" commit -qm main-root
+git -C "$UNREL" checkout -q --orphan other >/dev/null 2>&1
+git -C "$UNREL" rm -rf --cached . -q >/dev/null 2>&1
+printf 'b\n' > "$UNREL/b.txt"; git -C "$UNREL" add -A; git -C "$UNREL" commit -qm other-root
+check "size: no merge base dies instead of reporting a silent zero" \
+  '! bash "$DS" --repo "$UNREL" --base-ref main 2>/dev/null'
 
 echo "== 0.15.0 wiring (rounds across comments, base-ref hand-off, prompt rules) =="
 # The CI run on #1155 completed 7 rounds, died on the wall clock, and the next

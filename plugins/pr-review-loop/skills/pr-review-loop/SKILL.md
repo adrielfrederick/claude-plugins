@@ -441,7 +441,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
    ```bash
    "$LOOP_STATE" round-end --state "$STATE" --scoped "$SCOPED_THIS" \
-     --criticals 0 --findings {C+I} --fix-induced {F} --coverage-only {V} --pushed-back 0 \
+     --criticals 0 --findings {C+I} --fix-induced {F} --coverage-only {V} --pushed-back 0 --fixed 0 \
      --code-changed 0 --fix-class prod --forced-exit NEEDS_HUMAN_REVIEW:diminishing-returns
    ```
 
@@ -610,13 +610,14 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
    "$LOOP_STATE" round-end --state "$STATE" \
      --criticals {C} --findings {C+I} --fix-induced {F} --coverage-only {V} \
-     --pushed-back {P} --code-changed {0|1} --fix-class {tests|docs|prod} \
+     --pushed-back {P} --fixed {X} --code-changed {0|1} --fix-class {tests|docs|prod} \
      --scoped "$SCOPED_THIS" \
      $( [ "${ALL_WATCHDOG_KILLED:-0}" = "1" ] && printf -- '--all-watchdog-killed' )
    ```
 
    - `{C}` / `{C+I}`: CRITICAL and CRITICAL+IMPORTANT counts after Phase 2 dedup (SUGGESTIONs are not findings here).
    - `{F}` / `{V}`: the Phase 2 buckets (disjoint; substantive is the remainder).
+   - `{P}` / `{X}`: how many findings you pushed back on vs. actually fixed this round — `{X} + {P}` must equal `{C+I}` exactly (unless `--forced-exit` is given), so every finding is fixed or explicitly declined, none silently dropped. `{X}` must be 0 when `--code-changed` is 0.
    - `--code-changed`: 1 if this round pushed any commit, 0 if every finding was declined.
    - `--fix-class`: Phase 3 step 7's `LAST_FIX_CLASS` (the script forces `prod` when nothing changed).
 

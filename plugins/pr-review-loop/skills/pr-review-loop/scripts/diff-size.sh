@@ -97,7 +97,14 @@ normalize() {
 }
 
 counted=0; excluded=0; excluded_files=0
-TOP="$(mktemp)"; trap 'rm -f "$TOP"' EXIT
+TOP="$(mktemp)"; NUMSTAT="$(mktemp)"; trap 'rm -f "$TOP" "$NUMSTAT"' EXIT
+# Captured to a file and checked explicitly rather than fed straight into the
+# while-read via process substitution: a process substitution's exit status is
+# invisible to the calling shell, so a failed `git diff` (e.g. no merge base
+# between BASE and HEAD in a shallow checkout, even though both refs resolve)
+# would silently read as zero lines and report counted_added=0 / verdict=OK —
+# exactly the silent-failure class this script exists to catch in the PR itself.
+git -C "$REPO" diff --numstat "$BASE"...HEAD > "$NUMSTAT" || die "git diff --numstat $BASE...HEAD failed — cannot compute PR size"
 while IFS=$'\t' read -r add del path; do
   [ -n "$path" ] || continue
   path="$(normalize "$path")"
@@ -111,7 +118,7 @@ while IFS=$'\t' read -r add del path; do
     counted=$(( counted + add ))
     printf '%s\t%s\n' "$add" "$path" >> "$TOP"
   fi
-done < <(git -C "$REPO" diff --numstat "$BASE"...HEAD)
+done < "$NUMSTAT"
 
 verdict=OK
 if [ "$STOP" -gt 0 ] && [ "$counted" -ge "$STOP" ]; then verdict=STOP
@@ -126,13 +133,15 @@ echo "stop_at=$STOP"
 
 if [ -n "$SINCE" ]; then
   lp=0; lt=0
+  SINCE_NUMSTAT="$(mktemp)"; trap 'rm -f "$TOP" "$NUMSTAT" "$SINCE_NUMSTAT"' EXIT
+  git -C "$REPO" diff --numstat "$SINCE"..HEAD > "$SINCE_NUMSTAT" || die "git diff --numstat $SINCE..HEAD failed — cannot compute the loop's prod/test budget"
   while IFS=$'\t' read -r add del path; do
     [ -n "$path" ] || continue
     path="$(normalize "$path")"
     is_num "$add" || continue
     is_excluded "$path" && continue
     if is_test_path "$path"; then lt=$(( lt + add )); else lp=$(( lp + add )); fi
-  done < <(git -C "$REPO" diff --numstat "$SINCE"..HEAD)
+  done < "$SINCE_NUMSTAT"
   echo "loop_prod_added=$lp"
   echo "loop_test_added=$lt"
   if [ "$lt" -gt "$lp" ]; then echo "test_budget=EXCEEDED"; else echo "test_budget=OK"; fi

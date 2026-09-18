@@ -38,13 +38,17 @@
 #       counted here; the caller records the round with `round-end --forced-exit`.
 #   loop-state.sh round-end --state F --criticals N --findings N \
 #                        --fix-induced N --coverage-only N --pushed-back N \
-#                        --code-changed 0|1 --fix-class tests|docs|prod \
+#                        --fixed N --code-changed 0|1 --fix-class tests|docs|prod \
 #                        --scoped 0|1 [--all-watchdog-killed] \
 #                        [--forced-exit STATUS:reason]
 #       Called once per round from Phase 4. Advances the counters, persists the
 #       PR's lifetime round count to --rounds-file, and prints ONE line:
 #         CONTINUE scoped=0|1 severity_floor=0|1 sfh_effort=high|medium
 #         EXIT <STATUS> <reason>
+#       Unless --forced-exit is given, requires --fixed + --pushed-back to
+#       equal --findings exactly (every finding fixed or explicitly declined —
+#       none silently dropped) and --fixed to be 0 when --code-changed is 0
+#       (a fix without a code change is a contradiction).
 #   loop-state.sh validation-fix --state F --fix-class tests|docs|prod
 #       After the CLEAN-gate full validation failed and a fix was pushed: sets
 #       the next round's type from the fix class without counting a round.
@@ -105,10 +109,16 @@ load() {
 
 save() {
   local tmp="$STATE.tmp" k
+  # No caller checks save's exit status (there's no `set -e`), so a swallowed
+  # write/mv failure here would let round-end print CONTINUE/EXIT while the
+  # counters it just decided on were never persisted — exactly the class of
+  # silent-failure this script exists to replace ("counters in a file... a
+  # decision the model obeys", see the header). die loudly instead.
   {
     echo "# pr-review-loop state — written by loop-state.sh; do not edit by hand"
     for k in $KEYS; do printf '%s=%s\n' "$k" "$(sget "$k")"; done
-  } > "$tmp" && mv "$tmp" "$STATE"
+  } > "$tmp" || die "failed to write state to $tmp"
+  mv "$tmp" "$STATE" || die "failed to persist state: mv $tmp -> $STATE"
 }
 
 req_num() { is_num "${2:-}" || die "$1 must be a non-negative integer (got '${2:-}')"; }
@@ -116,8 +126,8 @@ req_num() { is_num "${2:-}" || die "$1 must be a non-negative integer (got '${2:
 write_rounds_file() {
   local f; f="$(sget ROUNDS_FILE)"
   [ -n "$f" ] || return 0
-  mkdir -p "$(dirname "$f")" 2>/dev/null || true
-  printf '%s\n' "$(sget PR_ROUNDS_TOTAL)" > "$f"
+  mkdir -p "$(dirname "$f")" || die "failed to create directory for rounds file: $(dirname "$f")"
+  printf '%s\n' "$(sget PR_ROUNDS_TOTAL)" > "$f" || die "failed to write rounds file: $f"
 }
 sfh_effort() { [ "$(sget CONSECUTIVE_CLEAN_ROUNDS)" -ge 1 ] && echo medium || echo high; }
 
@@ -125,7 +135,7 @@ cmd="${1:-}"; shift || true
 
 # ── argument parsing shared by the subcommands ─────────────────────────────
 PRIOR=""; MAXI=10; MAXPR=12; MAXFI=3; TIMEOUT=3600; ROUNDS_FILE=""
-CRIT=""; FIND=""; FIXI=""; COV=""; PUSHED=""; CODE=""; CLASS=""; SCOPED=0; WDK=0; FORCED=""
+CRIT=""; FIND=""; FIXI=""; COV=""; PUSHED=""; FIXED=""; CODE=""; CLASS=""; SCOPED=0; WDK=0; FORCED=""
 POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -141,6 +151,7 @@ while [ $# -gt 0 ]; do
     --fix-induced)   FIXI="${2:-}"; shift 2 ;;
     --coverage-only) COV="${2:-}"; shift 2 ;;
     --pushed-back)   PUSHED="${2:-}"; shift 2 ;;
+    --fixed)         FIXED="${2:-}"; shift 2 ;;
     --code-changed)  CODE="${2:-}"; shift 2 ;;
     --fix-class)     CLASS="${2:-}"; shift 2 ;;
     --scoped)        SCOPED="${2:-}"; shift 2 ;;
@@ -240,22 +251,24 @@ case "$cmd" in
     [ -z "$(sget EXIT_STATUS)" ] || die "this run already exited $(sget EXIT_STATUS) ($(sget EXIT_REASON)) — no further rounds. A new run needs a human re-label / re-invocation."
     req_num --criticals "$CRIT"; req_num --findings "$FIND"
     req_num --fix-induced "$FIXI"; req_num --coverage-only "$COV"; req_num --pushed-back "$PUSHED"
+    req_num --fixed "$FIXED"
     [ $(( FIXI + COV )) -le "$FIND" ] || die "--fix-induced + --coverage-only exceeds --findings: the buckets are disjoint"
     case "$CODE" in 0|1) ;; *) die "--code-changed must be 0 or 1";; esac
     case "$CLASS" in tests|docs|prod) ;; *) die "--fix-class must be tests|docs|prod";; esac
     case "$SCOPED" in 0|1) ;; *) die "--scoped must be 0 or 1";; esac
     # An empty change set must not vacuously count as "all tests" (SKILL.md Phase 3 step 7).
     if [ "$CODE" = "0" ] && [ "$CLASS" != "prod" ]; then CLASS=prod; fi
-    [ "$PUSHED" -le "$FIND" ] || die "--pushed-back ($PUSHED) exceeds --findings ($FIND): the counts are inconsistent"
-    # No code changed this round ⇒ nothing was fixed, so every finding must be
-    # accounted for by an explicit pushback (SKILL.md Phase 3: agree/partially
-    # agree/disagree — no finding is left silently unaddressed). Without this,
-    # --code-changed 0 --criticals 0 alone reaches the CLEAN branch below even
-    # when an IMPORTANT finding was never fixed OR pushed back. Skipped when
-    # --forced-exit is set: triage's diminishing-returns exit hands findings to
-    # a human without either a fix or a written pushback, by design.
-    if [ -z "$FORCED" ] && [ "$CODE" = "0" ] && [ "$PUSHED" -lt "$FIND" ]; then
-      die "--code-changed 0 but only $PUSHED of $FIND findings were pushed back — every finding must be fixed or explicitly declined with reasoning before round-end"
+    # Every finding must be accounted for — fixed, or explicitly pushed back
+    # with reasoning (SKILL.md Phase 3: agree/partially agree/disagree; no
+    # finding is left silently unaddressed). A round-changed=1 round used to be
+    # unchecked here: it could fix one of two findings, drop the other, and
+    # still reach CLEAN once a later review came back empty — the second
+    # finding was never fixed OR declined. Skipped under --forced-exit:
+    # triage's diminishing-returns exit hands the list to a human without
+    # engaging with each finding individually, by design.
+    if [ -z "$FORCED" ]; then
+      { [ "$CODE" = "1" ] || [ "$FIXED" -eq 0 ]; } || die "--code-changed 0 but --fixed ($FIXED) > 0: a fix requires a code change"
+      [ $(( FIXED + PUSHED )) -eq "$FIND" ] || die "--fixed ($FIXED) + --pushed-back ($PUSHED) != --findings ($FIND): every finding must be fixed or explicitly declined"
     fi
 
     # ── advance the counters ──
