@@ -139,7 +139,15 @@ If either is missing, stop and tell the user with the install link from the erro
    # the PR-resident half of the fix budget, so a fetch failure that silently
    # read as "no markers" would zero out the only source a fresh runner has
    # (no local $ROUNDS_FILE yet) and hand back a budget the PR already spent.
+   # A warning alone doesn't prevent that: if the local file is ALSO absent,
+   # falling back anyway means proceeding with an unverifiable PRIOR_ROUNDS —
+   # exactly the silent budget reset this whole feature exists to close. Only
+   # degrade gracefully when the local file gives a real fallback value.
    if ! all_bodies="$(gh pr view "$PR_NUMBER" --json comments -q "$("$HISTORY_IO" rounds-filter)" 2>&1)"; then
+     if [ ! -r "$ROUNDS_FILE" ]; then
+       echo "Error: couldn't read PR comments to reconstruct the round budget ($all_bodies), and no local rounds file exists at $ROUNDS_FILE either — cannot determine this PR's lifetime review-round count. Stopping rather than silently starting with a fresh budget; retry once GitHub is reachable." >&2
+       exit 1
+     fi
      echo "Warning: couldn't read PR comments to reconstruct the round budget ($all_bodies) — falling back to the local rounds file only." >&2
      all_bodies=""
    fi
@@ -433,9 +441,9 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 3. Categorize as CRITICAL / IMPORTANT / SUGGESTION. From here "findings" means CRITICAL + IMPORTANT after dedup; SUGGESTIONs never drive a round.
 
 3a. **Bucket every finding into exactly one of three, then ask the state script whether the round is worth fixing.**
-   - **substantive** — about the PR's own code, or a real bug that a fix introduced (a wrong output, a crash, a regression — with a concrete scenario).
+   - **substantive** — about the PR's own code, or a real bug that a fix introduced (a wrong output, a crash, a regression — with a concrete scenario). **Also count a coverage request here — not as `coverage-only` — when it covers a CRITICAL fixed earlier in this loop that landed without a test** (Phase 3 step 5's "must implement" exception). `triage`'s diminishing-returns exit fires whenever every finding is `fix-induced`/`coverage-only`; a must-fix coverage gap counted there would let the round exit `NEEDS_HUMAN_REVIEW` without ever adding the required regression test, defeating the exception that exists specifically to require it.
    - **fix-induced** — an edge case of code the *previous* round's fix added, that the fix "could also handle". Not a bug in the fix.
-   - **coverage-only** — asks for a test and names no bug in current code.
+   - **coverage-only** — asks for a test and names no bug in current code, and does not cover an untested prior-CRITICAL fix.
 
    ```bash
    LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
