@@ -144,8 +144,15 @@ If either is missing, stop and tell the user with the install link from the erro
    # exactly the silent budget reset this whole feature exists to close. Only
    # degrade gracefully when the local file gives a real fallback value.
    if ! all_bodies="$(gh pr view "$PR_NUMBER" --json comments -q "$("$HISTORY_IO" rounds-filter)" 2>&1)"; then
-     if [ ! -r "$ROUNDS_FILE" ]; then
-       echo "Error: couldn't read PR comments to reconstruct the round budget ($all_bodies), and no local rounds file exists at $ROUNDS_FILE either — cannot determine this PR's lifetime review-round count. Stopping rather than silently starting with a fresh budget; retry once GitHub is reachable." >&2
+     # Readable is not enough: `history-io.sh`'s own read_rounds_file()
+     # deliberately degrades an empty/corrupt file to 0 (a half-written
+     # counter from a killed run must not abort the loop when the PR-resident
+     # marker is ALSO available to max against) — but here the fetch just
+     # failed, so this file is the ONLY source, and a merely-readable-but-
+     # empty file (e.g. a prior run's write interrupted after truncation)
+     # would silently pass the old `-r`-only check and still resolve to 0.
+     if [ ! -r "$ROUNDS_FILE" ] || ! grep -Eq '^[0-9]+$' "$ROUNDS_FILE"; then
+       echo "Error: couldn't read PR comments to reconstruct the round budget ($all_bodies), and $ROUNDS_FILE is missing or does not hold a valid count either — cannot determine this PR's lifetime review-round count. Stopping rather than silently starting with a fresh budget; retry once GitHub is reachable." >&2
        exit 1
      fi
      echo "Warning: couldn't read PR comments to reconstruct the round budget ($all_bodies) — falling back to the local rounds file only." >&2
