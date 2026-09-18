@@ -846,7 +846,7 @@ fi
 - `scripts/diff-size.sh` — the PR-size gate (warn 1,500 / stop 2,500 counted added lines, artifacts excluded) and the loop's test budget (`--since`) (Phase 0.5, Phase 3)
 - `scripts/loop-state.sh` — every loop counter and the exit decision: `init`, `get`, `set`, `triage`, `round-end`, `validation-fix` (Phase 0, 1, 2, 3, 4); tested by `selftest.sh`
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
-- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4)
+- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4); runs every agent `--ephemeral` when the installed CLI supports it (0.15.1) — reviewers are one-shots whose only outputs are the `-o` review file and `$RUN_DIR` log, and un-pruned rollouts under `$CODEX_HOME/sessions/` were filling the runner's volume
 - `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
 - `scripts/gh-io.sh` — every GitHub **write** the loop makes (marker post, marker delete, summary post, progress comment post/edit/delete), with retry + a REST→GraphQL fallback; also the `reconcile` the CI workflow runs to prove the loop finished (Phase 0.5, Phase 5)
 - `scripts/selftest.sh` — runnable coverage for all of the above (no repo CI; run `bash scripts/selftest.sh`)
