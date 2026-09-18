@@ -218,6 +218,7 @@ case "$cmd" in
     load
     req_num --criticals "$CRIT"; req_num --findings "$FIND"
     req_num --fix-induced "$FIXI"; req_num --coverage-only "$COV"
+    [ "$CRIT" -le "$FIND" ] || die "--criticals ($CRIT) exceeds --findings ($FIND): criticals are a subset of findings"
     [ $(( FIXI + COV )) -le "$FIND" ] || die "--fix-induced + --coverage-only ($((FIXI + COV))) exceeds --findings ($FIND): the buckets are disjoint, classify each finding once"
     case "$SCOPED" in 0|1) ;; *) die "--scoped must be 0 or 1";; esac
     # Round 0 has no previous fix to chase, and a coverage-only round 0 is
@@ -252,6 +253,7 @@ case "$cmd" in
     req_num --criticals "$CRIT"; req_num --findings "$FIND"
     req_num --fix-induced "$FIXI"; req_num --coverage-only "$COV"; req_num --pushed-back "$PUSHED"
     req_num --fixed "$FIXED"
+    [ "$CRIT" -le "$FIND" ] || die "--criticals ($CRIT) exceeds --findings ($FIND): criticals are a subset of findings"
     [ $(( FIXI + COV )) -le "$FIND" ] || die "--fix-induced + --coverage-only exceeds --findings: the buckets are disjoint"
     case "$CODE" in 0|1) ;; *) die "--code-changed must be 0 or 1";; esac
     case "$CLASS" in tests|docs|prod) ;; *) die "--fix-class must be tests|docs|prod";; esac

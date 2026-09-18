@@ -925,6 +925,7 @@ check "set rejects a bad fix class"      '! bash "$LS" set --state "$ST/state" L
 tri() { bash "$LS" triage --state "$ST/state" "$@"; }
 check "triage never exits on round 0"    '[ "$(tri --criticals 0 --findings 2 --fix-induced 0 --coverage-only 2)" = "FIX" ]'
 check "triage rejects buckets > findings" '! tri --criticals 0 --findings 1 --fix-induced 1 --coverage-only 1 2>/dev/null'
+check "triage rejects criticals > findings" '! tri --criticals 1 --findings 0 --fix-induced 0 --coverage-only 0 2>/dev/null'
 re() { bash "$LS" round-end --state "$ST/state" "$@"; }
 out="$(re --criticals 1 --findings 3 --fix-induced 0 --coverage-only 1 --pushed-back 0 --fixed 3 --code-changed 1 --fix-class prod --scoped 0)"
 check "round 0 with a CRITICAL continues full" '[ "$out" = "CONTINUE scoped=0 severity_floor=0 sfh_effort=high" ]'
@@ -980,6 +981,7 @@ check "forced exit is echoed verbatim"   '[ "$(rend forced --criticals 0 --findi
 check "forced exit still counts the round" '[ "$(cat "$WORK/ls-forced/rounds")" = "5" ]'
 fresh args --prior-rounds 0
 check "round-end rejects a bad --code-changed" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed yes --fix-class prod --scoped 0 2>/dev/null'
+check "round-end rejects criticals > findings" '! rend args --criticals 1 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
 check "round-end rejects a bad --fix-class" '! rend args --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 1 --fix-class nope --scoped 0 2>/dev/null'
 check "round-end rejects a missing count" '! rend args --criticals 0 --findings 0 --pushed-back 0 --code-changed 1 --fix-class prod --scoped 0 2>/dev/null'
 check "a corrupt state file dies, not silently resets" 'printf "BOGUS=1\n" > "$WORK/ls-args/state" && ! bash "$LS" get --state "$WORK/ls-args/state" ITERATION 2>/dev/null'

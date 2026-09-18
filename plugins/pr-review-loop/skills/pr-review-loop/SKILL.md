@@ -732,9 +732,11 @@ CLAUDE: Automated Review Summary
 
 The `pr-review-loop:summary` marker on the second line is **required in both modes** and must be byte-exact. It's how `gh-io.sh reconcile` (and the CI workflow) tells "the loop published its verdict" from "the loop died quietly" — the heading prose is not the contract, since a human comment can quote it. Keep it an HTML comment so it stays invisible in the rendered comment.
 
-The `pr-review-loop:rounds` marker is **required in both modes** and carries `PR_ROUNDS_TOTAL` (= `PRIOR_ROUNDS + ITERATION`) — the PR's lifetime review-round count, which is what makes the Phase 4 fix budget survive a re-label. Write the number as plain digits. Also persist the local copy in the same bash call that posts the wrap-up, so a re-run on the same runner doesn't need to re-read the PR:
+The `pr-review-loop:rounds` marker is **required in both modes** and carries `PR_ROUNDS_TOTAL` (= `PRIOR_ROUNDS + ITERATION`) — the PR's lifetime review-round count, which is what makes the Phase 4 fix budget survive a re-label. Write the number as plain digits. Also persist the local copy in the same bash call that posts the wrap-up, so a re-run on the same runner doesn't need to re-read the PR. `PR_ROUNDS_TOTAL` lives in the state file, not in a bash variable that survives across calls (Phase 0 Step 7) — read it back explicitly rather than referencing a bare `$PR_ROUNDS_TOTAL`, or this write silently persists an empty counter in a fresh shell:
 
 ```bash
+LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"   # re-set: fresh shell
+PR_ROUNDS_TOTAL="$("$LOOP_STATE" get --state "$STATE" PR_ROUNDS_TOTAL)"
 printf '%s\n' "$PR_ROUNDS_TOTAL" > "$PR_ROOT/rounds-total"
 ```
 
