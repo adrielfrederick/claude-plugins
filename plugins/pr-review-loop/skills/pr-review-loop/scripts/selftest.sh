@@ -459,6 +459,13 @@ if command -v jq >/dev/null 2>&1; then
   check "rounds-filter excludes a prose mention of the token" \
     '[ "$(jq -r "$(bash "$HIO" rounds-filter)" < "$WORK/comments-inject.json" | bash "$HIO" rounds-total "$WORK/nonexistent")" = "4" ]'
 fi
+# A comment that BEGINS with a real-looking marker and then continues in prose
+# on the SAME line must also parse to nothing — a trailing `.*` (no end
+# anchor) would still match this and poison the count, as a leading-`.*`
+# pattern let happen against the plain-prose case above.
+TRAILING_INJECT="<!-- pr-review-loop:rounds 999 --> quoted from the previous summary"
+check "marker with trailing prose on the same line parses to nothing" \
+  '[ -z "$(printf "%s" "$TRAILING_INJECT" | bash "$HIO" rounds-parse)" ]'
 
 echo "== refresh-packet.sh (fixture repo + fake gh) =="
 REFRESH="$DIR/refresh-packet.sh"
@@ -985,6 +992,15 @@ chmod 555 "$WORK/ls-savefail"
 check "save failure dies instead of silently dropping state" \
   '! bash "$LS" set --state "$WORK/ls-savefail/state" LAST_FIX_BASE_SHA abc1234 2>/dev/null'
 chmod 755 "$WORK/ls-savefail"
+
+# write_rounds_file()'s mkdir -p can fail too (a path component is a regular
+# file, not a directory) — that failure must die just like save()'s, not just
+# emit a verdict with the lifetime round count silently left stale.
+rm -rf "$WORK/ls-roundsfail"; mkdir -p "$WORK/ls-roundsfail"
+printf 'x' > "$WORK/ls-roundsfail-blocker"
+bash "$LS" init --state "$WORK/ls-roundsfail/state" --rounds-file "$WORK/ls-roundsfail-blocker/rounds" --prior-rounds 0 >/dev/null 2>&1
+check "write_rounds_file failure dies instead of silently dropping the count" \
+  '! bash "$LS" round-end --state "$WORK/ls-roundsfail/state" --criticals 0 --findings 0 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 2>/dev/null'
 
 # An unresolved finding (neither fixed nor pushed back) must never reach the
 # CLEAN branch just because --code-changed is 0 — that would silently accept
