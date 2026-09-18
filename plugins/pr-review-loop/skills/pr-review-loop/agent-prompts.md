@@ -51,7 +51,7 @@ version on any behavioral edit (per repo CLAUDE.md).
 ## Roles at a glance
 
 - **code-reviewer** (full-auto): guideline compliance, bugs, quality.
-- **test-analyzer** (full-auto): behavioral coverage gaps.
+- **test-analyzer** (full-auto): behavioral coverage gaps. Since 0.15.0 a coverage gap is a SUGGESTION unless it exposes a bug in current code or covers a CRITICAL fixed this loop; at most one IMPORTANT per round after round 0; never a test for the previous round's fix.
 - **silent-failure-hunter** (read-only): swallowed errors, masked failures.
 - **type-design-analyzer** (read-only, mini): illegal-states-unrepresentable.
 - **comment-analyzer** (read-only, mini): comment/doc accuracy.

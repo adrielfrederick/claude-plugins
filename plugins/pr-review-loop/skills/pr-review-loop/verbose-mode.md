@@ -117,7 +117,7 @@ CLAUDE: Review Loop Complete
 - Duration: {minutes}m
 
 ## Status
-{CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
+{CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | PR_TOO_LARGE | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED}
 
 Unresolved IMPORTANT pushbacks do not block CLEAN — see individual round comments for reasoning.
 

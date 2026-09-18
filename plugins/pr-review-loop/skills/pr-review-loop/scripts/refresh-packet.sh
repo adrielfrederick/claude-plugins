@@ -16,7 +16,7 @@
 #   refresh-packet.sh --repo <path> --packet <dir> --pr <number> --base <bare-branch>
 #
 # Writes into <packet>/: diff.patch, files/*.patch (per-file splits, slashes →
-# __), manifest.txt, diff-wide.patch, changed-files.txt. Idempotent — stale
+# __), manifest.txt, diff-wide.patch, changed-files.txt, base-ref.txt. Idempotent — stale
 # files/ splits from the previous round are removed, not merged over.
 #
 # manifest.txt is the agents' AUTHORITATIVE file list (prompts/_packet.txt tells
@@ -178,5 +178,8 @@ SPLITS=$(find "$PACKET/files" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' 
 
 git -C "$REPO" diff "$BASE_REF"...HEAD -U30 > "$PACKET/diff-wide.patch"
 git -C "$REPO" diff --stat "$BASE_REF"...HEAD > "$PACKET/changed-files.txt"
+# The resolved base, for diff-size.sh (the PR-size gate and the loop's test
+# budget) — resolving it twice would be a second place for the logic to drift.
+printf '%s\n' "$BASE_REF" > "$PACKET/base-ref.txt"
 
 echo "packet refreshed: base=$BASE_REF files=$HDRS"
