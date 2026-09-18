@@ -81,7 +81,8 @@ is_excluded() {   # $1 = repo-relative path
 is_test_path() {
   case "$1" in
     tests/*|*/tests/*|test/*|*/test/*|spec/*|*/spec/*|__tests__/*|*/__tests__/*|\
-    *_test.*|*.test.*|*.spec.*|test_*|*/test_*|conftest.py|*/conftest.py) return 0;;
+    *_test.*|*.test.*|*.spec.*|test_*|*/test_*|conftest.py|*/conftest.py|\
+    selftest.*|*/selftest.*) return 0;;
     *) return 1;;
   esac
 }

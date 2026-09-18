@@ -214,7 +214,13 @@ If it exits non-zero, stop and surface its error — do not improvise the artifa
   --base-ref "$(cat "$PACKET/base-ref.txt")" \
   > "$RUN_DIR/size.txt"; SIZE_RC=$?
 cat "$RUN_DIR/size.txt"
+case "$SIZE_RC" in
+  0|3) ;;   # 0 = OK/WARN (read verdict= below); 3 = STOP (handled below)
+  *) echo "diff-size.sh failed (exit $SIZE_RC) — the size gate could not measure this PR (see $RUN_DIR/size.txt / its stderr). Stop here rather than reviewing a PR whose size was never validated; surface the error to the user." >&2; exit 1 ;;
+esac
 ```
+
+An exit code outside `{0, 3}` is an operational failure (unresolvable base ref, not a git repo, or — since diff-size.sh now dies rather than silently reporting `OK` on a failed `git diff`, e.g. no merge base in a shallow checkout — a failed size measurement), not a size verdict; `$RUN_DIR/size.txt` is empty or partial in that case. Do not fall through to reading `verdict=` — an empty read must never be treated as `OK` by omission.
 
 Read `verdict=` from `$RUN_DIR/size.txt`:
 - `OK` — continue.

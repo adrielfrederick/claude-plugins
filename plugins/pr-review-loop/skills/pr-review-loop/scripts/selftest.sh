@@ -1097,6 +1097,23 @@ git -C "$UNREL" rm -rf --cached . -q >/dev/null 2>&1
 printf 'b\n' > "$UNREL/b.txt"; git -C "$UNREL" add -A; git -C "$UNREL" commit -qm other-root
 check "size: no merge base dies instead of reporting a silent zero" \
   '! bash "$DS" --repo "$UNREL" --base-ref main 2>/dev/null'
+# This project's own test runner is scripts/selftest.sh — not *_test.* or
+# test_*, so the generic is_test_path patterns miss it. Every round of THIS
+# review loop adds lines to it, and an unrecognized test file counts as
+# production for the --since budget, silently defeating the exact check this
+# repo is dogfooding.
+SELF="$WORK/fixture-selftest"
+git init -q -b main "$SELF" 2>/dev/null || { git init -q "$SELF"; git -C "$SELF" checkout -qb main; }
+git -C "$SELF" config user.email t@t; git -C "$SELF" config user.name t
+mkdir -p "$SELF/scripts"
+printf 'base\n' > "$SELF/scripts/selftest.sh"
+git -C "$SELF" add -A; git -C "$SELF" commit -qm base
+SELFSTART="$(git -C "$SELF" rev-parse HEAD)"
+seq 1 6 > "$SELF/scripts/selftest.sh"
+git -C "$SELF" add -A; git -C "$SELF" commit -qm "loop: grew selftest.sh"
+out="$(bash "$DS" --repo "$SELF" --base-ref main --since "$SELFSTART")"
+check "size: selftest.sh is recognized as a test path" \
+  '[ "$(printf "%s" "$out" | sed -n "s/^loop_test_added=//p")" = "6" ] && [ "$(printf "%s" "$out" | sed -n "s/^loop_prod_added=//p")" = "0" ]'
 
 echo "== 0.15.0 wiring (rounds across comments, base-ref hand-off, prompt rules) =="
 # The CI run on #1155 completed 7 rounds, died on the wall clock, and the next
