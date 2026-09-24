@@ -33,7 +33,7 @@ A failure scenario counts only if its trigger is reachable in how this code actu
 - Tampering, hand-editing or planted files in the operator's own repo, state or artifacts.
 - Misuse by a caller that doesn't exist yet.
 - Local tooling failures (git, filesystem) in operator-run code that already fail loudly — an uncaught exception is an acceptable outcome there.
-For operator-run tooling (research scripts, one-off CLIs, infra scripts run by hand), failing loudly is the correct default: don't ask for extra guards, provenance stamps or refusals beyond it. A test gap counts only if it leaves reachable behavior unpinned — never a test for a guard against an unreachable trigger — and the project's testing policy in CLAUDE.md / AGENTS.md wins over your own preference.
+For operator-run tooling (research scripts, one-off CLIs, infra scripts run by hand), failing loudly is the correct default: don't ask for extra guards, provenance stamps or refusals beyond it.
 
 Before reporting each finding, ask:
 1. Would a senior reviewer block merge on this alone? If no → not CRITICAL, not IMPORTANT.

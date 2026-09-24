@@ -500,12 +500,14 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
 ## Phase 3: Claude responds
 
-1. **Triage each CRITICAL and IMPORTANT finding for reachability before touching code.** A finding is a claim, not an instruction. Name its trigger — where the bad input or state would come from — and put it in one bucket:
+1. **Check each CRITICAL and IMPORTANT finding for reachability before touching code.** A finding is a claim, not an instruction. Name its trigger — where the bad input or state would come from — and put it in one bucket:
    - **Normal use** — the path runs in ordinary operation. → Fix.
    - **Realistic failure** — a failure that actually happens here. That means one of: seen in this project's data or logs, a known failure mode of a dependency or external service, or input from outside the project. → Fix.
    - **Unreachable** — the trigger can't arrive given how the code runs. For example: the only caller is trusted and already enforces the constraint; an upstream check, schema, type or DB constraint rules the state out; the finding is a race or mid-run change in code one operator runs by hand, tampering with the operator's own files, or a caller that doesn't exist. → Decline, citing the caller, invariant or entry point that rules it out.
 
    The burden is symmetric. A fix needs a named, realistic trigger, just as a pushback needs evidence. A finding with no nameable trigger is unreachable, not a fix. "Realistic" is judged against how the code actually runs, which gives operator-run tooling a higher bar: for research scripts, one-off CLIs and infra scripts run by hand, failing loudly is already enough.
+
+   Declining a **CRITICAL** as unreachable, in a round that changes no code, ends the loop `NEEDS_HUMAN_REVIEW critical-declined` (Phase 4). That is intended: the reviewer still rates it CRITICAL despite the packet's reachability rules, so the disagreement is a human's call. Decline it anyway when the evidence holds, and put the reachability argument in the summary so the human can rule quickly.
 
    Two more rules:
    - **Fix-induced findings (Phase 2's bucket) are declines.** When one arrives in a round that still has substantive findings, so the diminishing-returns exit didn't fire, decline it: "also cover case X" and "widen the check" on code an earlier fix added are not bugs. A real bug *in* that fix — a wrong output, a crash, a broken caller — is substantive, and gets fixed.
@@ -652,7 +654,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
    "$LOOP_STATE" round-end --state "$STATE" \
      --criticals {C} --findings {C+I} --fix-induced {F} --coverage-only {V} \
-     --pushed-back {P} --fixed {X} --code-changed {0|1} --fix-class {tests|docs|prod} \
+     --pushed-back {P} --fixed {X} --unreachable {U} --code-changed {0|1} --fix-class {tests|docs|prod} \
      --scoped "$SCOPED_THIS" \
      $( [ "${ALL_WATCHDOG_KILLED:-0}" = "1" ] && printf -- '--all-watchdog-killed' )
    ```
@@ -660,6 +662,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - `{C}` / `{C+I}`: CRITICAL and CRITICAL+IMPORTANT counts after Phase 2 dedup (SUGGESTIONs are not findings here).
    - `{F}` / `{V}`: the Phase 2 buckets (disjoint; substantive is the remainder).
    - `{P}` / `{X}`: how many findings you pushed back on vs. actually fixed this round — `{X} + {P}` must equal `{C+I}` exactly (unless `--forced-exit` is given), so every finding is fixed or explicitly declined, none silently dropped. `{X}` must be 0 when `--code-changed` is 0.
+   - `{U}`: how many of the `{P}` pushbacks were reachability declines (Phase 3 step 1). The script keeps the run's totals for the wrap-up.
    - `--code-changed`: 1 if this round pushed any commit, 0 if every finding was declined.
    - `--fix-class`: Phase 3 step 7's `LAST_FIX_CLASS` (the script forces `prod` when nothing changed).
 
@@ -749,7 +752,7 @@ CLAUDE: Automated Review Summary
 - Status: {CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | PR_TOO_LARGE | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED} ({reason from round-end, e.g. diminishing-returns})
 - Size: {counted} counted added lines ({excluded} excluded as artifacts) — {OK | WARN | STOP}
 - Test budget: the loop added {T} test lines against {P} production lines — {OK | EXCEEDED}
-- Triage: {F} fixed, {P} pushed back ({U} as unreachable)
+- Reachability: {TOTAL_FIXED} fixed, {TOTAL_PUSHED_BACK} pushed back ({TOTAL_UNREACHABLE} as unreachable) — read each with `"$LOOP_STATE" get --state "$STATE" <KEY>`
 
 ## Issues Fixed
 - [severity] `file:line` — {original issue} → Fixed: {how}

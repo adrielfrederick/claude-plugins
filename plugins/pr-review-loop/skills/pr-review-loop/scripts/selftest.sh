@@ -1015,6 +1015,16 @@ rend() { bash "$LS" round-end --state "$WORK/ls-$1/state" "${@:2}"; }
 fresh standoff --prior-rounds 0
 check "declined CRITICAL with no change → NEEDS_HUMAN_REVIEW" 'rend standoff --criticals 1 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 1 --fixed 0 --code-changed 0 --fix-class prod --scoped 0 | grep -q "^EXIT NEEDS_HUMAN_REVIEW critical-declined"'
 check "validation-fix refuses after a non-CLEAN exit" '! bash "$LS" validation-fix --state "$WORK/ls-standoff/state" --fix-class tests >/dev/null 2>&1'
+# ── reachability totals (0.16.0): the wrap-up's counts come from the state file ──
+fresh reach --prior-rounds 0
+check "totals start at 0"                '[ "$(bash "$LS" get --state "$WORK/ls-reach/state" TOTAL_UNREACHABLE)" = "0" ]'
+check "--unreachable > --pushed-back dies" '! rend reach --criticals 0 --findings 2 --fix-induced 0 --coverage-only 0 --pushed-back 1 --fixed 1 --unreachable 2 --code-changed 1 --fix-class prod --scoped 0 2>/dev/null'
+rend reach --criticals 0 --findings 3 --fix-induced 0 --coverage-only 0 --pushed-back 2 --fixed 1 --unreachable 1 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
+rend reach --criticals 0 --findings 2 --fix-induced 0 --coverage-only 0 --pushed-back 2 --fixed 0 --unreachable 2 --code-changed 0 --fix-class prod --scoped 0 >/dev/null
+check "TOTAL_FIXED accumulates"          '[ "$(bash "$LS" get --state "$WORK/ls-reach/state" TOTAL_FIXED)" = "1" ]'
+check "TOTAL_PUSHED_BACK accumulates"    '[ "$(bash "$LS" get --state "$WORK/ls-reach/state" TOTAL_PUSHED_BACK)" = "4" ]'
+check "TOTAL_UNREACHABLE accumulates"    '[ "$(bash "$LS" get --state "$WORK/ls-reach/state" TOTAL_UNREACHABLE)" = "3" ]'
+check "--unreachable defaults to 0"      '[ "$(bash "$LS" get --state "$ST/state" TOTAL_UNREACHABLE)" = "0" ]'
 fresh maxit --prior-rounds 0 --max-iterations 2
 rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 >/dev/null
 check "per-run cap → MAX_ITERATIONS_REACHED" 'rend maxit --criticals 0 --findings 1 --fix-induced 0 --coverage-only 0 --pushed-back 0 --fixed 1 --code-changed 1 --fix-class prod --scoped 0 | grep -q "^EXIT MAX_ITERATIONS_REACHED"'
