@@ -86,6 +86,9 @@ for r in code-reviewer test-analyzer silent-failure-hunter type-design-analyzer 
   check "$r has failure_scenario field" 'grep -qi "Failure scenario" "$RC/prompt-'"$r"'.txt"'
 done
 check "failure-pattern-analyst has failure scenario" 'grep -qi "failure scenario" "$RC/prompt-failure-pattern-analyst.txt"'
+for r in code-reviewer test-analyzer silent-failure-hunter type-design-analyzer failure-pattern-analyst; do
+  check "$r gets the REACHABILITY rules" 'grep -q "^REACHABILITY" "$RC/prompt-'"$r"'.txt"'
+done
 check "code-reviewer has removed-behavior" 'grep -qi "Removed-behavior audit" "$RC/prompt-code-reviewer.txt"'
 check "code-reviewer has cross-file trace" 'grep -qi "Cross-file trace" "$RC/prompt-code-reviewer.txt"'
 check "comment-analyzer severity aligned"  'grep -qi "ACTIVELY MISLEADING" "$RC/prompt-comment-analyzer.txt"'
@@ -96,7 +99,7 @@ BIN="$WORK/bin"; mkdir -p "$BIN"
 # fake codex: writes "No issues found." to the -o path, exits 0
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
 [ -n "$out" ] && echo "No issues found." > "$out"
 FAKE
@@ -109,24 +112,30 @@ ALL=(code-reviewer test-analyzer silent-failure-hunter type-design-analyzer fail
 RD="$WORK/run-sel"; mkdir -p "$RD"; mkprompts "$RD" "${ALL[@]}"
 PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=30 bash "$LAUNCH" --run-dir "$RD" --repo "$WORK" \
   --sfh-effort high --skip failure-pattern-analyst --add comment-analyzer >/dev/null 2>&1
-for r in code-reviewer test-analyzer silent-failure-hunter type-design-analyzer comment-analyzer; do
+for r in code-reviewer test-analyzer silent-failure-hunter comment-analyzer; do
   check "launched $r"                     '[ -f "$RD/review-'"$r"'.txt" ]'
 done
 check "fpa skipped"                       '[ ! -f "$RD/review-failure-pattern-analyst.txt" ]'
 check "code-simplifier not auto-added"    '[ ! -f "$RD/review-code-simplifier.txt" ]'
+# type-design-analyzer left the core tier in 0.16.0 — it runs only via --add.
+check "type-design-analyzer not auto-added" '[ ! -f "$RD/review-type-design-analyzer.txt" ]'
+RDt="$WORK/run-tda"; mkdir -p "$RDt"; mkprompts "$RDt" "${ALL[@]}"
+PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=30 bash "$LAUNCH" --run-dir "$RDt" --repo "$WORK" \
+  --skip failure-pattern-analyst --add type-design-analyzer >/dev/null 2>&1
+check "--add type-design-analyzer launches it" '[ -f "$RDt/review-type-design-analyzer.txt" ]'
 check ".done written on success"          '[ -f "$RD/.done" ]'
 check "no .failed on success"             '[ ! -f "$RD/.failed" ]'
 
-echo "== codex version floor (gpt-5.6 family) =="
-# Every role runs a gpt-5.6-* model (heavy: sol, mini: luna), which the API
-# rejects with a 400 below codex 0.144.1. launch-agents.sh must refuse to spawn
-# when the CLI is too old — one clear message beats every agent 400ing mid-round.
-# Fake an old codex (the model name is present but the server gate isn't) and
-# confirm the launch dies before any agent runs — for a heavy batch AND a mini
-# batch, since the guard matches the whole family, not one model.
+echo "== codex version floor (gpt-6 family) =="
+# Every role runs a gpt-6-* model (astra, sol, luna), which the API rejects
+# with a 400 below codex 0.156.1. launch-agents.sh must refuse to spawn when the
+# CLI is too old — one clear message beats every agent 400ing mid-round. Fake
+# 0.153.4 (a real stale version: it knows the model names but the server
+# rejects sol/luna) and confirm the launch dies before any agent runs — for a
+# heavy batch AND a mini batch, since the guard matches the whole family.
 cat > "$BIN/codex" <<'OLD'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.143.0"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
 [ -n "$out" ] && echo "No issues found." > "$out"
 OLD
@@ -134,20 +143,20 @@ chmod +x "$BIN/codex"
 RDver="$WORK/run-oldcodex"; mkdir -p "$RDver"; mkprompts "$RDver" "${ALL[@]}"
 errver="$(PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDver" --repo "$WORK" --skip failure-pattern-analyst 2>&1)"; rcver=$?
 check "old codex fails a heavy batch"       '[ "'"$rcver"'" -ne 0 ]'
-check "old codex names the version floor"   'printf "%s" "'"$errver"'" | grep -q "too old for the gpt-5.6"'
+check "old codex names the version floor"   'printf "%s" "'"$errver"'" | grep -q "too old for the gpt-6"'
 check "old codex launches no agents"        '! ls "$RDver"/review-*.txt >/dev/null 2>&1'
-# A mini (gpt-5.6-luna) scoped batch must ALSO hit the floor — the guard keys on
-# the gpt-5.6- family prefix, not on the heavy model.
+# A mini (gpt-6-luna) scoped batch must ALSO hit the floor — the guard keys on
+# the gpt-6- family prefix, not on the heavy model.
 RDmini="$WORK/run-mini-oldcodex"; mkdir -p "$RDmini"; mkprompts "$RDmini" "${ALL[@]}"
 PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDmini" --repo "$WORK" --only type-design-analyzer >/dev/null 2>&1
 rcmini=$?
 check "old codex fails a mini (luna) batch"  '[ "'"$rcmini"'" -ne 0 ]'
 check "old codex runs no mini agents"        '[ ! -f "$RDmini/review-type-design-analyzer.txt" ]'
 # Restore a current-codex fake — the sections below assume a CLI that clears the
-# gpt-5.6 floor (they don't set their own version and select 5.6 roles).
+# gpt-6 floor (they don't set their own version and select gpt-6 roles).
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
 [ -n "$out" ] && echo "No issues found." > "$out"
 FAKE
@@ -157,12 +166,12 @@ echo "== --ephemeral (probed per CLI) =="
 # codex exec persists a rollout per agent under $CODEX_HOME/sessions and never
 # prunes them — the runner's volume filled with them (0.15.1). Reviewers are
 # one-shots, so the launcher passes --ephemeral, but only when `codex exec
-# --help` advertises it: an older laptop CLI that clears the gpt-5.6 floor must
+# --help` advertises it: an older laptop CLI that clears the gpt-6 floor must
 # keep launching, just persistently. The fakes below log their argv so the
 # check is on what codex was actually invoked with.
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.153.4"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 [ "$1" = "exec" ] && [ "${2:-}" = "--help" ] && { echo "      --ephemeral  Run without persisting session files to disk"; exit 0; }
 printf '%s\n' "$@" >> "$CODEX_ARGS_LOG"
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
@@ -174,10 +183,10 @@ CODEX_ARGS_LOG="$RDe/args.log" PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=30 \
   bash "$LAUNCH" --run-dir "$RDe" --repo "$WORK" --only code-reviewer >"$RDe/launch.out" 2>&1
 check "ephemeral: passed when the CLI advertises it"  'grep -qx -- "--ephemeral" "$RDe/args.log"'
 check "ephemeral: agent still ran"                    '[ -f "$RDe/review-code-reviewer.txt" ]'
-check "ephemeral: launch line reports it"             'grep -q "ephemeral=.yes." "$RDe/launch.out"'
+check "ephemeral: launch line reports it"             'grep -q "ephemeral=.yes.)" "$RDe/launch.out"'
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 [ "$1" = "exec" ] && [ "${2:-}" = "--help" ] && { echo "      --json  Print events to stdout as JSONL"; exit 0; }
 printf '%s\n' "$@" >> "$CODEX_ARGS_LOG"
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
@@ -189,11 +198,11 @@ CODEX_ARGS_LOG="$RDn/args.log" PATH="$BIN:$PATH" AGENT_TIMEOUT_SECONDS=30 \
   bash "$LAUNCH" --run-dir "$RDn" --repo "$WORK" --only code-reviewer >"$RDn/launch.out" 2>&1
 check "ephemeral: omitted when the CLI lacks it"      '! grep -qx -- "--ephemeral" "$RDn/args.log"'
 check "ephemeral: older CLI still launches"           '[ -f "$RDn/review-code-reviewer.txt" ]'
-check "ephemeral: launch line reports no"             'grep -q "ephemeral=.no." "$RDn/launch.out"'
+check "ephemeral: launch line reports no"             'grep -q "ephemeral=.no.)" "$RDn/launch.out"'
 # Restore the current-codex fake the sections below assume.
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
 [ -n "$out" ] && echo "No issues found." > "$out"
 FAKE
@@ -208,7 +217,7 @@ check "refuses to skip a core agent (non-zero)" '[ "$?" -ne 0 ]'
 RDo="$WORK/run-only"; mkdir -p "$RDo"; mkprompts "$RDo" "${ALL[@]}"
 PATH="$BIN:$PATH" bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer,test-analyzer >/dev/null 2>&1
 check "--only runs exactly the named roles"   '[ -f "$RDo/review-code-reviewer.txt" ] && [ -f "$RDo/review-test-analyzer.txt" ]'
-check "--only omits unnamed core agents"      '[ ! -f "$RDo/review-silent-failure-hunter.txt" ] && [ ! -f "$RDo/review-type-design-analyzer.txt" ]'
+check "--only omits unnamed core agents"      '[ ! -f "$RDo/review-silent-failure-hunter.txt" ]'
 check "--only rejects an unknown role"        '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only nope 2>/dev/null'
 check "--only rejects combining with --add"   '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only code-reviewer --add comment-analyzer 2>/dev/null'
 check "--only rejects an empty value"         '! bash "$LAUNCH" --run-dir "$RDo" --repo "$WORK" --only "" 2>/dev/null'
@@ -228,7 +237,7 @@ done
 echo "== agent-failure detection =="
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 exit 1
 FAKE
 chmod +x "$BIN/codex"
@@ -242,7 +251,7 @@ check "AGENT_FAILED sentinel appended"    'grep -q "^AGENT_FAILED" "$RDf/review-
 echo "== watchdog kill =="
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 sleep 120
 FAKE
 chmod +x "$BIN/codex"
@@ -260,7 +269,7 @@ check "watchdog leaves no .failed"        '[ ! -f "$RDw/.failed" ]'
 echo "== exit-0 with empty output =="
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 exit 0
 FAKE
 chmod +x "$BIN/codex"
@@ -284,7 +293,7 @@ echo "== watchdog classification is out-of-band (sentinel spoof) =="
 # watchdog kill (which would let the batch exit 0 on a crash).
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
 [ -n "$out" ] && printf 'WATCHDOG_KILLED spoofed by model output\n' > "$out"
 exit 1
@@ -304,7 +313,7 @@ echo "== spurious watchdog fire on a completed agent =="
 # a partial/killed review. Simulated by pre-creating the marker file.
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
 [ -n "$out" ] && printf 'No issues found.\nWATCHDOG_KILLED after 900s\n' > "$out"
 FAKE
@@ -325,7 +334,7 @@ echo "== zombie-fire: marker on a CRASHED agent stays a crash =="
 # a marker + exit 1 must classify AGENT_FAILED, not "expected watchdog kill".
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 exit 1
 FAKE
 chmod +x "$BIN/codex"
@@ -347,7 +356,7 @@ check "no corrupted placeholder remains"     '! grep -q "{PACKET_PATH}" "$RDamp/
 echo "== CODEX_SANDBOX_UNAVAILABLE bypass =="
 cat > "$BIN/codex" <<'FAKE'
 #!/usr/bin/env bash
-[ "$1" = "--version" ] && { echo "codex-cli 0.144.1"; exit 0; }
+[ "$1" = "--version" ] && { echo "codex-cli 0.156.1"; exit 0; }
 out=""; a=("$@"); for ((i=0;i<${#a[@]};i++)); do [ "${a[$i]}" = "-o" ] && out="${a[$((i+1))]}"; done
 [ -n "$out" ] && echo "No issues found." > "$out"
 printf '%s\n' "$*" >> "$SANDBOX_TRACE"

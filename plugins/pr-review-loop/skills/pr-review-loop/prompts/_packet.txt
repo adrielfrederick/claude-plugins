@@ -25,6 +25,16 @@ Definitions (apply strictly):
 - SUGGESTION: Style, refactor, future improvement. For human discretion — these should NOT drive another review round.
 - A COVERAGE-ONLY finding — one that asks for a test and names no bug in current code — is a SUGGESTION regardless of persona. It reaches IMPORTANT only under the test-analyzer's two conditions (a bug in current code the test would catch, or a CRITICAL fixed this loop with no test). "A refactor could remove this guard" is not a failure scenario.
 
+REACHABILITY (applies to every CRITICAL and IMPORTANT):
+A failure scenario counts only if its trigger is reachable in how this code actually runs. Name where the bad input or state comes from — an entry point (API route, CLI, scheduled job, CI step) or an external source (user input, third-party API, file or data this project doesn't produce) — and why it can arrive there. These are NOT reachable triggers; report them as SUGGESTION at most, or omit:
+- Validation of values only this project's own code constructs, when the constructing code already enforces the constraint (constructor/__post_init__ checks, isinstance or range checks on internal values).
+- A state an upstream check, schema, type or DB constraint already rules out.
+- Concurrency, mid-run data changes or ordering races in code one operator runs by hand.
+- Tampering, hand-editing or planted files in the operator's own repo, state or artifacts.
+- Misuse by a caller that doesn't exist yet.
+- Local tooling failures (git, filesystem) in operator-run code that already fail loudly — an uncaught exception is an acceptable outcome there.
+For operator-run tooling (research scripts, one-off CLIs, infra scripts run by hand), failing loudly is the correct default: don't ask for extra guards, provenance stamps or refusals beyond it. A test gap counts only if it leaves reachable behavior unpinned — never a test for a guard against an unreachable trigger — and the project's testing policy in CLAUDE.md / AGENTS.md wins over your own preference.
+
 Before reporting each finding, ask:
 1. Would a senior reviewer block merge on this alone? If no → not CRITICAL, not IMPORTANT.
 2. Is this a variant of something in "All Prior Pushbacks" (when history is present)? If yes → skip unless you have a stronger counter-argument.

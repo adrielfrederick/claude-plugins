@@ -334,6 +334,8 @@ Example:
   CLAUDE: "This endpoint is idempotent; retries belong at the caller level per architecture docs."
 - **R5** backend/betting/identity.py:147 — CODEX flagged team slug validation
   CLAUDE: "Pre-existing PRIMARY KEY schema constraint. Schema migration is out of scope for this PR."
+- **R6** backend/scripts/refit_arms.py:245 (unreachable) — CODEX asked to hash lap rows to detect mid-run DB writes
+  CLAUDE: "Operator-run script fitting past seasons on the local DB; nothing writes those rows during a run."
 
 ## Recent Rounds (last 2)
 ### Round N-1
@@ -347,9 +349,9 @@ CODEX: 0 CRITICAL, 6 IMPORTANT. CLAUDE: 4 fixed, 2 pushed back.
 Every review round launches **one parallel batch** — there is no serial "secondary round" (it was the single most frequent critical-path agent and rarely changed the verdict). The batch = the **core tier** plus the conditional pattern agent plus any **judgment add-ons** you select for this round.
 
 **Core tier — always, every round, all parallel:**
-`code-reviewer`, `test-analyzer`, `silent-failure-hunter`, `type-design-analyzer`.
+`code-reviewer`, `test-analyzer`, `silent-failure-hunter`.
 
-These four run on every round regardless of diff size. `type-design-analyzer` is in the core tier (promoted from the old secondary round) because it reliably surfaces real invariant/encapsulation IMPORTANTs and, running in parallel, adds ~0 wall time.
+These three run on every round regardless of diff size. `type-design-analyzer` was core until 0.16.0. It left because an audit of 706 f1-predictions PRs found that ~95% of the findings it got accepted guarded states no real caller could produce, and accepting them made the loop add validators to internal-only types. It is now a judgment add-on (below).
 
 **Conditional add-on — `failure-pattern-analyst`:** `launch-agents.sh` runs it by default. When `$PACKET/failure-patterns.md` is absent, pass `--skip failure-pattern-analyst` (the persona self-short-circuits, but skipping avoids the launch cost).
 
@@ -359,8 +361,9 @@ These four run on every round regardless of diff size. `type-design-analyzer` is
 |---|---|
 | `comment-analyzer` | The diff adds or changes a non-trivial amount of comments, docstrings, or docs whose accuracy is worth verifying — not just a couple of one-line comments. |
 | `code-simplifier` | The change is large or spans multiple files with real logic complexity — a plausible candidate for consolidation/simplification. A small, single-file, mechanical diff is not. |
+| `type-design-analyzer` | The diff adds or reshapes types at a trust boundary: public API request/response models, parsers of external data, or records persisted and read back. Types built only from this project's own already-validated values don't qualify. |
 
-There is no fixed diff-size gate — judge from the packet (`changed-files.txt`, the diff). These two earn their keep on some PRs and are pure noise on others. Default to including a judgment add-on on the round where its trigger first clearly applies (usually the first round on a large diff); don't re-run it every round once it has reported, unless the change has grown materially. When in doubt on a small/clean diff, omit both. Add them with `--add comment-analyzer` / `--add code-simplifier`.
+There is no fixed diff-size gate — judge from the packet (`changed-files.txt`, the diff). These add-ons earn their keep on some PRs and are pure noise on others. Default to including a judgment add-on on the round where its trigger first clearly applies (usually the first round on a large diff); don't re-run it every round once it has reported, unless the change has grown materially. When in doubt on a small/clean diff, omit them. Add them with `--add comment-analyzer` / `--add code-simplifier` / `--add type-design-analyzer`.
 
 Never omit a **core-tier** agent — each catches a different class of issue. This is now enforced structurally: `launch-agents.sh` always runs the core tier and refuses `--skip` on a core agent, so the PR-470-style accidental omission of `silent-failure-hunter` cannot recur.
 
@@ -373,8 +376,8 @@ Never omit a **core-tier** agent — each catches a different class of issue. Th
 Then call the script once, listing exactly the roles Step 2 selected:
 
 ```bash
-ROLES="code-reviewer,test-analyzer,silent-failure-hunter,type-design-analyzer,failure-pattern-analyst"
-# add ,comment-analyzer / ,code-simplifier if selected; drop failure-pattern-analyst if no failure-patterns.md
+ROLES="code-reviewer,test-analyzer,silent-failure-hunter,failure-pattern-analyst"
+# add ,comment-analyzer / ,code-simplifier / ,type-design-analyzer if selected; drop failure-pattern-analyst if no failure-patterns.md
 LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
 ITERATION="$("$LOOP_STATE" get --state "$STATE" ITERATION)"
 
@@ -400,7 +403,7 @@ LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"
 SFH_EFFORT="$("$LOOP_STATE" get --state "$STATE" SFH_EFFORT)"   # medium once CONSECUTIVE_CLEAN_ROUNDS ≥ 1, else high
 
 # ADDON_FLAGS: set from Step 2's judgment, e.g. ADDON_FLAGS="--add comment-analyzer"
-# or "--add comment-analyzer --add code-simplifier"; leave empty to add neither.
+# or "--add comment-analyzer --add type-design-analyzer"; leave empty to add none.
 ADDON_FLAGS=""
 SKIP_FLAGS=$( [ ! -f "$PACKET/failure-patterns.md" ] && echo "--skip failure-pattern-analyst" )
 
@@ -497,7 +500,25 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
 ## Phase 3: Claude responds
 
-1. For each finding: **Agree** (fix it), **Partially agree** (modified fix), or **Disagree** (pushback with written reasoning). A pushback must **cite the evidence that defeats the finding** — the specific code line, existing guard, type/constant, or project convention that makes it wrong or already-handled — not just assert judgment. If you can't point to concrete evidence, either fix it or ask, don't hand-wave. (These citations become the "All Prior Pushbacks" entries reviewers must clear a higher bar to re-raise, so they need to actually hold up.)
+1. **Triage each CRITICAL and IMPORTANT finding for reachability before touching code.** A finding is a claim, not an instruction. Name its trigger — where the bad input or state would come from — and put it in one bucket:
+   - **Normal use** — the path runs in ordinary operation. → Fix.
+   - **Realistic failure** — a failure that actually happens here. That means one of: seen in this project's data or logs, a known failure mode of a dependency or external service, or input from outside the project. → Fix.
+   - **Unreachable** — the trigger can't arrive given how the code runs. For example: the only caller is trusted and already enforces the constraint; an upstream check, schema, type or DB constraint rules the state out; the finding is a race or mid-run change in code one operator runs by hand, tampering with the operator's own files, or a caller that doesn't exist. → Decline, citing the caller, invariant or entry point that rules it out.
+
+   The burden is symmetric. A fix needs a named, realistic trigger, just as a pushback needs evidence. A finding with no nameable trigger is unreachable, not a fix. "Realistic" is judged against how the code actually runs, which gives operator-run tooling a higher bar: for research scripts, one-off CLIs and infra scripts run by hand, failing loudly is already enough.
+
+   Two more rules:
+   - **Fix-induced findings (Phase 2's bucket) are declines.** When one arrives in a round that still has substantive findings, so the diminishing-returns exit didn't fire, decline it: "also cover case X" and "widen the check" on code an earlier fix added are not bugs. A real bug *in* that fix — a wrong output, a crash, a broken caller — is substantive, and gets fixed.
+   - **Size the fix to the failure:** make the smallest change that closes the reachable failure. Don't add a validator, exception type or docstring that outweighs the logic it describes.
+
+   **Why (0.16.0):** an audit of 706 f1-predictions PRs found:
+   - The implementer fixed 82% of findings, and 42% of loops ended with no pushback at all.
+   - About 22% of fixes guarded triggers that couldn't occur. Most sat in operator-run tooling, and 220 of 647 later-round fixes rewrote an earlier fix's lines.
+   - About 40% of fixes were real defects, so "push back more" across the board would lose real catches.
+   - The asymmetry was the cause: pushbacks needed evidence and fixes needed none. So the implementer declined on scope and convention but almost never on reachability.
+   - Nearly all of that data predates 0.15.0. The coverage-only rules below address the test share; speculative production guards (~19% of all fixes) were untouched until this rule.
+
+   Then respond to each finding: **Agree** (fix it), **Partially agree** (modified fix), or **Disagree** (pushback with written reasoning). A pushback must **cite the evidence that defeats the finding** — the specific code line, existing guard, type/constant, caller, or project convention that makes it wrong, already handled or unreachable — not just assert judgment. If you can't point to concrete evidence for either a fix's trigger or a pushback, ask rather than hand-wave. (These citations become the "All Prior Pushbacks" entries reviewers must clear a higher bar to re-raise, so they need to actually hold up.) Tag a reachability decline `(unreachable)` in its history entry so later rounds and the wrap-up can tell it apart from other pushbacks.
 
    **Coverage-only findings are answered, not implemented, by default (0.15.0).** A finding that asks for a test and names no bug in current code needs no "defeating evidence" — the test genuinely does not exist, and that is not a reason to write it. Decline it, citing one of:
    - (a) an existing test that already exercises the path — name it (`rg` the symbol in the test tree);
@@ -728,12 +749,13 @@ CLAUDE: Automated Review Summary
 - Status: {CLEAN | NEEDS_HUMAN_REVIEW | FIX_BUDGET_EXHAUSTED | PR_TOO_LARGE | TIMED_OUT | MAX_ITERATIONS_REACHED | CODEX_DEGRADED} ({reason from round-end, e.g. diminishing-returns})
 - Size: {counted} counted added lines ({excluded} excluded as artifacts) — {OK | WARN | STOP}
 - Test budget: the loop added {T} test lines against {P} production lines — {OK | EXCEEDED}
+- Triage: {F} fixed, {P} pushed back ({U} as unreachable)
 
 ## Issues Fixed
 - [severity] `file:line` — {original issue} → Fixed: {how}
 
 ## Issues Pushed Back
-- [severity] `file:line` — {original issue}
+- [severity] `file:line` — {original issue} {append "(unreachable)" for a reachability decline}
   Author reasoning: {Claude's rationale}
 
 ## Remaining Suggestions (not addressed)
