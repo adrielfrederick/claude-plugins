@@ -39,7 +39,7 @@
 #   loop-state.sh round-end --state F --criticals N --findings N \
 #                        --fix-induced N --coverage-only N --pushed-back N \
 #                        --fixed N --code-changed 0|1 --fix-class tests|docs|prod \
-#                        --scoped 0|1 [--all-watchdog-killed] \
+#                        --scoped 0|1 [--unreachable N] [--all-watchdog-killed] \
 #                        [--forced-exit STATUS:reason]
 #       Called once per round from Phase 4. Advances the counters, persists the
 #       PR's lifetime round count to --rounds-file, and prints ONE line:
@@ -48,7 +48,12 @@
 #       Unless --forced-exit is given, requires --fixed + --pushed-back to
 #       equal --findings exactly (every finding fixed or explicitly declined —
 #       none silently dropped) and --fixed to be 0 when --code-changed is 0
-#       (a fix without a code change is a contradiction).
+#       (a fix without a code change is a contradiction). --unreachable (default
+#       0) is how many of the pushbacks were reachability declines (SKILL.md
+#       Phase 3 step 1); it must not exceed --pushed-back. The run's cumulative
+#       TOTAL_FIXED / TOTAL_PUSHED_BACK / TOTAL_UNREACHABLE feed the wrap-up's
+#       Reachability line — kept here, not in context, for the same reason as
+#       every other counter.
 #   loop-state.sh validation-fix --state F --fix-class tests|docs|prod
 #       After the CLEAN-gate full validation failed and a fix was pushed: sets
 #       the next round's type from the fix class without counting a round.
@@ -90,10 +95,11 @@ is_num() { case "${1:-}" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
 STATE=""
 # Keys are stored in plain variables ST_<KEY> (macOS ships bash 3.2, which has
 # no associative arrays). KEYS is the closed set the file may hold.
-KEYS="ITERATION START_TIME PRIOR_ROUNDS PR_ROUNDS_TOTAL CONSECUTIVE_CLEAN_ROUNDS FIX_INDUCED_ROUNDS SEVERITY_FLOOR_ACTIVE SCOPED_NEXT LAST_FIX_CLASS LAST_FIX_BASE_SHA MAX_ITERATIONS MAX_PR_ROUNDS MAX_FIX_INDUCED_ROUNDS TIMEOUT_SECONDS ROUNDS_FILE EXIT_STATUS EXIT_REASON"
+KEYS="ITERATION START_TIME PRIOR_ROUNDS PR_ROUNDS_TOTAL CONSECUTIVE_CLEAN_ROUNDS FIX_INDUCED_ROUNDS SEVERITY_FLOOR_ACTIVE SCOPED_NEXT LAST_FIX_CLASS LAST_FIX_BASE_SHA MAX_ITERATIONS MAX_PR_ROUNDS MAX_FIX_INDUCED_ROUNDS TIMEOUT_SECONDS ROUNDS_FILE EXIT_STATUS EXIT_REASON TOTAL_FIXED TOTAL_PUSHED_BACK TOTAL_UNREACHABLE"
 known_key() { case " $KEYS " in *" $1 "*) return 0;; *) return 1;; esac; }
 sget() { local n="ST_$1"; printf '%s' "${!n-}"; }
 sset() { known_key "$1" || die "internal: unknown key $1"; printf -v "ST_$1" '%s' "$2"; }
+sadd() { local cur; cur="$(sget "$1")"; sset "$1" $(( ${cur:-0} + $2 )); }
 
 load() {
   [ -n "$STATE" ] || die "--state is required"
@@ -135,7 +141,7 @@ cmd="${1:-}"; shift || true
 
 # ── argument parsing shared by the subcommands ─────────────────────────────
 PRIOR=""; MAXI=10; MAXPR=12; MAXFI=3; TIMEOUT=3600; ROUNDS_FILE=""
-CRIT=""; FIND=""; FIXI=""; COV=""; PUSHED=""; FIXED=""; CODE=""; CLASS=""; SCOPED=0; WDK=0; FORCED=""
+CRIT=""; FIND=""; FIXI=""; COV=""; PUSHED=""; FIXED=""; UNREACH=0; CODE=""; CLASS=""; SCOPED=0; WDK=0; FORCED=""
 POS=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -152,6 +158,7 @@ while [ $# -gt 0 ]; do
     --coverage-only) COV="${2:-}"; shift 2 ;;
     --pushed-back)   PUSHED="${2:-}"; shift 2 ;;
     --fixed)         FIXED="${2:-}"; shift 2 ;;
+    --unreachable)   UNREACH="${2:-}"; shift 2 ;;
     --code-changed)  CODE="${2:-}"; shift 2 ;;
     --fix-class)     CLASS="${2:-}"; shift 2 ;;
     --scoped)        SCOPED="${2:-}"; shift 2 ;;
@@ -178,6 +185,7 @@ case "$cmd" in
     sset SEVERITY_FLOOR_ACTIVE 0; sset SCOPED_NEXT 0; sset LAST_FIX_CLASS prod; sset LAST_FIX_BASE_SHA ""
     sset MAX_ITERATIONS "$MAXI"; sset MAX_PR_ROUNDS "$MAXPR"; sset MAX_FIX_INDUCED_ROUNDS "$MAXFI"
     sset TIMEOUT_SECONDS "$TIMEOUT"; sset ROUNDS_FILE "$ROUNDS_FILE"; sset EXIT_STATUS ""; sset EXIT_REASON ""
+    sset TOTAL_FIXED 0; sset TOTAL_PUSHED_BACK 0; sset TOTAL_UNREACHABLE 0
     save
     if [ "$PRIOR" -ge "$MAXPR" ]; then
       echo "loop-state.sh: WARNING — this PR has already had $PRIOR rounds (budget $MAXPR); the first round-end will exit FIX_BUDGET_EXHAUSTED." >&2
@@ -252,7 +260,8 @@ case "$cmd" in
     [ -z "$(sget EXIT_STATUS)" ] || die "this run already exited $(sget EXIT_STATUS) ($(sget EXIT_REASON)) — no further rounds. A new run needs a human re-label / re-invocation."
     req_num --criticals "$CRIT"; req_num --findings "$FIND"
     req_num --fix-induced "$FIXI"; req_num --coverage-only "$COV"; req_num --pushed-back "$PUSHED"
-    req_num --fixed "$FIXED"
+    req_num --fixed "$FIXED"; req_num --unreachable "$UNREACH"
+    [ "$UNREACH" -le "$PUSHED" ] || die "--unreachable ($UNREACH) exceeds --pushed-back ($PUSHED): a reachability decline is a pushback"
     [ "$CRIT" -le "$FIND" ] || die "--criticals ($CRIT) exceeds --findings ($FIND): criticals are a subset of findings"
     [ $(( FIXI + COV )) -le "$FIND" ] || die "--fix-induced + --coverage-only exceeds --findings: the buckets are disjoint"
     case "$CODE" in 0|1) ;; *) die "--code-changed must be 0 or 1";; esac
@@ -274,6 +283,8 @@ case "$cmd" in
     fi
 
     # ── advance the counters ──
+    # Run totals for the wrap-up. Keys absent from an older state file read as 0.
+    sadd TOTAL_FIXED "$FIXED"; sadd TOTAL_PUSHED_BACK "$PUSHED"; sadd TOTAL_UNREACHABLE "$UNREACH"
     it=$(( $(sget ITERATION) + 1 )); sset ITERATION "$it"
     total=$(( $(sget PRIOR_ROUNDS) + it )); sset PR_ROUNDS_TOTAL "$total"
     streak="$(sget CONSECUTIVE_CLEAN_ROUNDS)"

@@ -23,12 +23,13 @@
 #   launch-agents.sh --run-dir <dir> --repo <path> \
 #                    [--sfh-effort high|medium] \
 #                    [--add comment-analyzer] [--add code-simplifier] \
+#                    [--add type-design-analyzer] \
 #                    [--skip failure-pattern-analyst]
 #
-# Core tier (code-reviewer, test-analyzer, silent-failure-hunter,
-# type-design-analyzer) always runs — there is deliberately no flag to skip a
-# core agent. failure-pattern-analyst runs by default; pass
-# --skip failure-pattern-analyst when the packet has no failure-patterns.md.
+# Core tier (code-reviewer, test-analyzer, silent-failure-hunter) always runs —
+# there is deliberately no flag to skip a core agent. failure-pattern-analyst
+# runs by default; pass --skip failure-pattern-analyst when the packet has no
+# failure-patterns.md.
 set -u
 
 RUN_DIR=""
@@ -69,39 +70,48 @@ esac
 # Per-role config: "sandbox|model-flag|effort". silent-failure-hunter's effort
 # is overridden from --sfh-effort below.
 #
-# The heavy review roles are pinned to gpt-5.6-sol; the low-value roles to the
-# cheaper gpt-5.6-luna (the 5.6-family mini). Before 0.8.0 the heavy roles had an
-# empty -m and tracked the ambient config default — non-deterministic across the
-# laptop and the runner, which has no config.toml. Pinning makes the review
-# models identical everywhere. Every gpt-5.6-* model needs codex >= 0.144.1
-# (enforced below).
+# Pins chosen (0.16.0) from Artificial Analysis evals of the gpt-6 family, per
+# role: code-reviewer gets gpt-6-astra at low — it beats gpt-6-sol at xhigh on
+# every index (intelligence, Terminal-Bench, hallucination rate) in less wall
+# time. The other sol roles moved up one effort notch versus the 5.6 pins,
+# because gpt-6-sol at high costs and takes less than gpt-5.6-sol at medium.
+# The mini (luna) roles are nit-level, and run at medium since they still finish
+# inside the round's slowest agent. No role runs at xhigh or astra-medium:
+# the batch waits for its slowest agent, and those would double every round.
+# Before 0.8.0 the heavy roles had an empty -m and tracked the ambient config
+# default — non-deterministic across the laptop and the runner, which has no
+# config.toml. Pinning makes the review models identical everywhere. Every
+# gpt-6-* model needs codex >= MIN_CODEX_FOR_GPT6 (enforced below).
 role_config() {
   case "$1" in
-    code-reviewer)           echo "-s workspace-write|-m gpt-5.6-sol|medium" ;;
-    test-analyzer)           echo "-s workspace-write|-m gpt-5.6-sol|medium" ;;
-    silent-failure-hunter)   echo "-s read-only|-m gpt-5.6-sol|$SFH_EFFORT" ;;
-    type-design-analyzer)    echo "-s read-only|-m gpt-5.6-luna|medium" ;;
-    comment-analyzer)        echo "-s read-only|-m gpt-5.6-luna|low" ;;
-    code-simplifier)         echo "-s read-only|-m gpt-5.6-luna|low" ;;
-    failure-pattern-analyst) echo "-s read-only|-m gpt-5.6-sol|medium" ;;
+    code-reviewer)           echo "-s workspace-write|-m gpt-6-astra|low" ;;
+    test-analyzer)           echo "-s workspace-write|-m gpt-6-sol|high" ;;
+    silent-failure-hunter)   echo "-s read-only|-m gpt-6-sol|$SFH_EFFORT" ;;
+    type-design-analyzer)    echo "-s read-only|-m gpt-6-luna|medium" ;;
+    comment-analyzer)        echo "-s read-only|-m gpt-6-luna|medium" ;;
+    code-simplifier)         echo "-s read-only|-m gpt-6-luna|medium" ;;
+    failure-pattern-analyst) echo "-s read-only|-m gpt-6-sol|medium" ;;
     *)                       return 1 ;;
   esac
 }
 
-# The gpt-5.6 models (sol, luna) have a hard client-version floor: the model name
-# is baked into older CLIs (it shows up in `-m` and the session header), but the
-# API rejects it with a 400 "requires a newer version of Codex" until the CLI is
-# >= 0.144.1. Guard here — colocated with the model pins, the single source of
-# truth — so a stale codex (e.g. an un-rebuilt runner image) fails fast with one
-# clear line instead of every agent 400ing mid-round and surfacing as AGENT_FAILED.
-MIN_CODEX_FOR_GPT56="0.144.1"
+# The gpt-6 models have a hard client-version floor, and the failure is
+# misleading: on a ChatGPT-account login, codex 0.153.4 accepts `-m gpt-6-sol` /
+# `-m gpt-6-luna` (they show in the session header) and the API then 400s with
+# "model is not supported when using Codex with a ChatGPT account" — which
+# reads like a plan problem, not a version one. 0.156.1 is the first release
+# with sol/luna and was verified on 2026-09-24 against every pin above. Guard
+# here — colocated with the model pins, the single source of truth — so a stale
+# codex (e.g. an un-rebuilt runner image) fails fast with one clear line instead
+# of every agent 400ing mid-round and surfacing as AGENT_FAILED.
+MIN_CODEX_FOR_GPT6="0.156.1"
 require_codex_version() {
   local min="$1" have
   have="$(codex --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-  [ -n "$have" ] || die "could not read codex version (need >= $min for the gpt-5.6 models)"
+  [ -n "$have" ] || die "could not read codex version (need >= $min for the gpt-6 models)"
   # have >= min  ⟺  min is the smaller (or equal) of the two under version sort.
   if [ "$(printf '%s\n%s\n' "$min" "$have" | sort -V | head -1)" != "$min" ]; then
-    die "codex $have is too old for the gpt-5.6 models (need >= $min). Run 'codex update' on a laptop, or rebuild the pr-runner image on the server."
+    die "codex $have is too old for the gpt-6 models (need >= $min). Run 'codex update' on a laptop, or rebuild the pr-runner image on the server."
   fi
 }
 
@@ -112,14 +122,17 @@ require_codex_version() {
 # tripling after the codex 0.153 rebuild). Reviewers are stateless one-shots
 # whose only outputs are the -o review file and the log in $RUN_DIR, so nothing
 # reads those rollouts — run ephemeral wherever the CLI supports it. Probed
-# rather than assumed so a laptop CLI that clears the gpt-5.6 floor but lacks
+# rather than assumed so a laptop CLI that clears the gpt-6 floor but lacks
 # the flag still launches.
 CODEX_EPHEMERAL=""
 if codex exec --help 2>/dev/null | grep -q -- '--ephemeral'; then
   CODEX_EPHEMERAL="--ephemeral"
 fi
 
-CORE=(code-reviewer test-analyzer silent-failure-hunter type-design-analyzer)
+# type-design-analyzer left the core tier in 0.16.0: an audit of 706 f1-predictions
+# PRs found ~95% of its accepted findings guarded states no real caller can
+# produce. It is now a judgment add-on (SKILL.md Phase 1 Step 2).
+CORE=(code-reviewer test-analyzer silent-failure-hunter)
 
 # ── --only: run EXACTLY the named roles (scoped verify rounds). This is the one
 # path that bypasses core-tier enforcement — deliberately, because a scoped
@@ -157,8 +170,8 @@ ROLES=("${CORE[@]}" failure-pattern-analyst)
 for a in "${ADDONS[@]:-}"; do
   [ -n "$a" ] || continue
   case "$a" in
-    comment-analyzer|code-simplifier) ROLES+=("$a") ;;
-    *) die "--add expects comment-analyzer or code-simplifier, got '$a'" ;;
+    comment-analyzer|code-simplifier|type-design-analyzer) ROLES+=("$a") ;;
+    *) die "--add expects comment-analyzer, code-simplifier or type-design-analyzer, got '$a'" ;;
   esac
 done
 
@@ -193,12 +206,12 @@ for role in "${ROLES[@]}"; do
   role_config "$role" >/dev/null || die "no config for role '$role'"
 done
 
-# If any selected role uses a gpt-5.6-* model, enforce its codex floor before we
+# If any selected role uses a gpt-6-* model, enforce its codex floor before we
 # spawn a single agent. Matched on the family prefix (not a specific model) so it
-# covers sol + luna today and stays quiet for any future non-5.6 role.
+# covers astra + sol + luna today and stays quiet for any future non-6 role.
 for role in "${ROLES[@]}"; do
   case "$(role_config "$role")" in
-    *"-m gpt-5.6-"*) require_codex_version "$MIN_CODEX_FOR_GPT56"; break ;;
+    *"-m gpt-6-"*) require_codex_version "$MIN_CODEX_FOR_GPT6"; break ;;
   esac
 done
 
@@ -270,7 +283,7 @@ launch() {
   # write the marker AFTER the classification check (a TOCTOU that would leave a
   # spurious kill record on a completed review, dropping its findings).
   AGENT_PIDS+=("$role:$apid:$wpid")
-  echo "launched $role (sandbox='$sandbox' model='${model:-default}' effort='$effort' ephemeral='${CODEX_EPHEMERAL:+yes}${CODEX_EPHEMERAL:-no}') pid=$apid"
+  echo "launched $role (sandbox='$sandbox' model='${model:-default}' effort='$effort' ephemeral='$([ -n "$CODEX_EPHEMERAL" ] && echo yes || echo no)') pid=$apid"
 }
 
 AGENT_PIDS=()
