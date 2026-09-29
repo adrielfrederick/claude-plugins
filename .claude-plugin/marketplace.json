@@ -27,9 +27,9 @@
       "homepage": "https://github.com/adrielfrederick/claude-plugins"
     },
     {
-      "name": "recap",
+      "name": "gist",
       "description": "Manual session-gist checkpoint — writes a dated markdown gist with frontmatter interoperable with the vault-context auto-gist pipeline.",
-      "source": "./plugins/recap",
+      "source": "./plugins/gist",
       "category": "development",
       "homepage": "https://github.com/adrielfrederick/claude-plugins"
     }
