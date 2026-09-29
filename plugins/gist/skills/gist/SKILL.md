@@ -1,26 +1,28 @@
 ---
-name: recap
-description: Manual checkpoint — write a session gist capturing the current Claude Code session with full in-context fidelity. Use when the user invokes /recap explicitly to checkpoint progress mid-session or before closing out. NOTE for repos with `vault-context` installed (f1-predictions, Unfurl, vault): the scheduled `<slug>-context` MCP routine auto-writes gists for ended sessions 3×/day from the JSONL transcript — /recap is the manual override for "I want this captured *now* with full in-context fidelity," and the two produce interoperable files (same session_id, same filename schema) so they don't duplicate.
+name: gist
+description: Manual checkpoint — write a session gist capturing the current Claude Code session with full in-context fidelity. Use when the user invokes /gist explicitly to checkpoint progress mid-session or before closing out. NOTE for repos with `vault-context` installed (f1-predictions, Unfurl, vault): the scheduled `<slug>-context` MCP routine auto-writes gists for ended sessions 3×/day from the JSONL transcript — /gist is the manual override for "I want this captured *now* with full in-context fidelity," and the two produce interoperable files (same session_id, same filename schema) so they don't duplicate. Not the same as Claude Code's built-in /recap, which prints a throwaway in-terminal summary; /gist writes a durable file.
 ---
 
-# /recap — Session Gist Writer (manual checkpoint)
+# /gist — Session Gist Writer (manual checkpoint)
 
 Captures a Claude Code session as a dated markdown gist in the current repo's `docs/sessions/` folder. The goal is to eliminate the "reconstitute context next session" tax — the next session (or the user) can read the gist to understand what was done, what was decided, what was tried and failed, and what comes next.
 
-**Interop with `vault-context`** (as of vault-context 0.5.0 / recap 0.1.0): both systems write gists to the same `docs/sessions/` with the same filename schema (`YYYY-MM-DD - <slug>.md`) and the same frontmatter keys (`session_id`, `date`, `repo`, `slug`, `shape`). `vault-context`'s `write_gists` performs slug-drift cleanup keyed by frontmatter `session_id`, so when a manually-written /recap gist and an auto-written vault-context gist share a `session_id`, they end up at the SAME on-disk path (the later writer overwrites; no orphans). **For this to work, /recap MUST include `session_id` in the frontmatter** — see step 3 below.
+**Interop with `vault-context`** (as of vault-context 0.5.0 / this plugin's 0.1.0, when it was named `recap`): both systems write gists to the same `docs/sessions/` with the same filename schema (`YYYY-MM-DD - <slug>.md`) and the same frontmatter keys (`session_id`, `date`, `repo`, `slug`, `shape`). `vault-context`'s `write_gists` performs slug-drift cleanup keyed by frontmatter `session_id`, so when a gist written manually with /gist and an auto-written vault-context gist share a `session_id`, they end up at the SAME on-disk path (the later writer overwrites; no orphans). **For this to work, /gist MUST include `session_id` in the frontmatter** — see step 3 below.
 
 ## When to invoke
 
-- User types `/recap` (optionally with a slug: `/recap boost-calibration`)
+- User types `/gist` (optionally with a slug: `/gist boost-calibration`)
 - User says "save a session gist" / "checkpoint this session" / similar
+
+This plugin was named `recap` until 0.3.0; it was renamed because Claude Code's built-in `/recap` (an in-terminal "while you were away" summary that writes nothing to disk) now owns that name. If the user asks for a "recap" and it's ambiguous whether they want a file written, ask.
 
 ## Workflow
 
 ### 1. Determine the repo (write to the MAIN working tree, not a worktree)
 
-Find the repo root for the current cwd with `git rev-parse --show-toplevel`. If it fails (not in a git repo), tell the user and stop — `/recap` is only for tracked repos.
+Find the repo root for the current cwd with `git rev-parse --show-toplevel`. If it fails (not in a git repo), tell the user and stop — `/gist` is only for tracked repos.
 
-**Then resolve the durable base path.** If `/recap` is invoked from a linked git worktree, the gist must NOT land under the worktree — when the worktree is torn down, the gist goes with it. Always write to the MAIN working tree instead. Compute it:
+**Then resolve the durable base path.** If `/gist` is invoked from a linked git worktree, the gist must NOT land under the worktree — when the worktree is torn down, the gist goes with it. Always write to the MAIN working tree instead. Compute it:
 
 ```bash
 git worktree list --porcelain | sed -n 's/^worktree //p' | head -1
@@ -66,10 +68,10 @@ Pick the dominant shape. If genuinely split, pick the one closest to the session
 
 Format: `YYYY-MM-DD - <slug>.md` (absolute date, space-dash-space separator, matches vault naming conventions AND `vault-context`'s output).
 
-- Slug comes from `$ARGUMENTS` if provided (e.g. `/recap boost-calibration` → slug = `boost-calibration`)
+- Slug comes from `$ARGUMENTS` if provided (e.g. `/gist boost-calibration` → slug = `boost-calibration`)
 - Otherwise, synthesize a short kebab-case slug from the session's dominant theme (3–6 words, e.g. `context-system-design`, `wastegate-oscillation-debug`)
 - **Normalize the slug — whatever its source — before building the filename** (a `$ARGUMENTS` slug is NOT exempt): lowercase; replace every character outside `[a-z0-9-]` with a hyphen; strip leading/trailing hyphens; collapse consecutive hyphens. Dots are the common trap — a version number like `v1.2` must become `v1-2`. This isn't cosmetic: `vault-context`'s server validates the filename against `^\d{4}-\d{2}-\d{2} - [a-z0-9][a-z0-9-]{0,80}\.md$` and rejects (HTTP 400) any slug carrying a `.`, `_`, space, or other stray character, so an unnormalized slug silently fails to sync forever.
-- If a gist for today with the same slug already exists AND it has a DIFFERENT `session_id` in its frontmatter, append a suffix: `- part-2`, `- part-3`, etc. (Don't overwrite a different session's file.) If the existing file has the SAME `session_id`, you ARE re-recapping the same session — overwrite it.
+- If a gist for today with the same slug already exists AND it has a DIFFERENT `session_id` in its frontmatter, append a suffix: `- part-2`, `- part-3`, etc. (Don't overwrite a different session's file.) If the existing file has the SAME `session_id`, you ARE re-gisting the same session — overwrite it.
 
 ### 6. Synthesize the gist content
 
@@ -145,13 +147,13 @@ shape: <one of: research, drafting, notes-processing, planning, vault-hygiene, p
 
 ## Examples
 
-### User: `/recap`
+### User: `/gist`
 You: detect repo → grab `$CLAUDE_CODE_SESSION_ID` → classify shape → synthesize slug from session theme → write gist → report path.
 
-### User: `/recap context-system-design`
+### User: `/gist context-system-design`
 You: detect repo → grab session_id → classify shape → use provided slug → write gist → report path.
 
-### User: `/recap and push to vault`
+### User: `/gist and push to vault`
 (Later phase — not in v1. For now, ignore the "push to vault" part and just write the local gist. Tell the user vault-push is a separate routine that hasn't shipped yet.)
 
 ## What NOT to do

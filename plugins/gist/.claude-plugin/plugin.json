@@ -1,0 +1,11 @@
+{
+  "name": "gist",
+  "description": "Manual session-gist writer — checkpoint a Claude Code session as a dated markdown gist in the repo's docs/sessions/. Frontmatter is interoperable with the vault-context auto-gist pipeline (same session_id + shape + filename schema), so /gist and the scheduled vault-context jobs don't produce duplicates. (Formerly the `recap` plugin; renamed to avoid Claude Code's built-in /recap.)",
+  "version": "0.3.0",
+  "author": {
+    "name": "Adriel Frederick"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/adrielfrederick/claude-plugins",
+  "repository": "https://github.com/adrielfrederick/claude-plugins"
+}
