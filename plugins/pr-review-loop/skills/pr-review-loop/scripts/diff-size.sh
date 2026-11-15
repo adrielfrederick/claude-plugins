@@ -4,9 +4,9 @@
 #
 # Why: a review packet above ~3,000 added lines does not converge. On
 # f1-predictions#1155 a 3,900-line packet fed five reviewers something new every
-# round for 24 rounds, growing to 6,000 lines as the fixes landed; the runner's
-# 75-minute cap gets about three rounds on a packet that size. The repo's own
-# CLAUDE.md said "split before labeling" and was not followed. So the loop now
+# round for 24 rounds, growing to 6,000 lines as the fixes landed; the one-hour
+# run cap gets about three rounds on a packet that size. The repo's own
+# CLAUDE.md said to split large PRs first, and that was not followed. So the loop now
 # measures the packet itself and refuses to start on one it cannot finish.
 #
 # "Lines a reviewer has to read" excludes artifacts: JSON/CSV/notebooks,

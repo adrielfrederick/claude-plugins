@@ -8,8 +8,8 @@
 # Phase 0.5, and base-ref resolution had zero test coverage.
 #
 # Base-ref resolution: --base is the BARE branch name from `gh pr view` (e.g.
-# "main"). On a laptop it exists as a local branch; in a CI/runner head-only
-# checkout it must resolve via origin/<base> or an explicit fetch. Hard-fails
+# "main"). It resolves to the local branch if there is one, else origin/<base>,
+# else an explicit fetch. Hard-fails
 # rather than silently producing an empty packet.
 #
 # Usage:
@@ -56,8 +56,8 @@ done
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "not a git repo: $REPO"
 mkdir -p "$PACKET"
 
-# Resolve the bare base name fresh each call (laptop: local branch; runner:
-# origin/<base> or fetch). FETCH_HEAD is safe here because the loop never runs
+# Resolve the bare base name fresh each call (local branch, else origin/<base>,
+# else fetch). FETCH_HEAD is safe here because the loop never runs
 # another fetch between this resolution and the diffs below.
 if git -C "$REPO" rev-parse -q --verify "refs/heads/$BASE" >/dev/null 2>&1; then
   BASE_REF="$BASE"

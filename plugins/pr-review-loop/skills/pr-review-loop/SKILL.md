@@ -25,14 +25,10 @@ Set `QUIET_MODE=true` unless `verbose` is in `$ARGUMENTS`. Tell the user which m
 
 ## Runtime: drive the whole loop within one turn
 
-You may be running non-interactively under `claude --print` (e.g. a self-hosted
-CI runner triggered by a label). In that mode **there is no turn resumption and
-no scheduled wakeup — you are never re-invoked after you stop.** So you must
-carry every phase to completion within a single turn: never launch background
-work and then stop/yield to "wait" for it to finish and resume you. Anything you
-background is orphaned and killed the moment you stop, and the loop dies silently
-with no summary. Block on long-running work **inline** instead (see Phase 1
-Step 4). This is also correct interactively — it just matters most here.
+Carry every phase to completion within a single turn: never launch background
+work and then stop/yield to "wait" for it to finish and resume you. A loop that
+yields mid-round can leave its in-flight marker on the PR with no summary. Block
+on long-running work **inline** instead (see Phase 1 Step 4).
 
 ## Phase 0: Setup
 
@@ -46,7 +42,7 @@ command -v gh    >/dev/null 2>&1 || { echo "Error: gh (GitHub CLI) not found on 
 
 (`command -v` alone is not enough: a broken vendored binary passes it and then every agent dies mid-round — observed live when a codex release's signing cert was revoked.)
 
-**Codex version floor.** The review roles are pinned to Codex models that have a hard client-version minimum — a too-old CLI is rejected *server-side* with a 400 ("requires a newer version of Codex"), not a clean "model not found", and the model names are baked into older CLIs so they *look* available. `launch-agents.sh` enforces the floor before spawning any agent and `die`s with the required version if the CLI is too old, so you don't check it here — but if a round dies with a "too old for the … models" message, upgrade Codex (`codex update` on a laptop; **rebuild the runner image** on the server, since it bakes Codex in at build time) and re-run. The exact models + floor live in `launch-agents.sh` (single source of truth).
+**Codex version floor.** The review roles are pinned to Codex models that have a hard client-version minimum — a too-old CLI is rejected *server-side* with a 400 ("requires a newer version of Codex"), not a clean "model not found", and the model names are baked into older CLIs so they *look* available. `launch-agents.sh` enforces the floor before spawning any agent and `die`s with the required version if the CLI is too old, so you don't check it here — but if a round dies with a "too old for the … models" message, upgrade Codex (`codex update`) and re-run. The exact models + floor live in `launch-agents.sh` (single source of truth).
 
 If either is missing, stop and tell the user with the install link from the error message — do not proceed to the numbered steps below.
 
@@ -58,7 +54,7 @@ If either is missing, stop and tell the user with the install link from the erro
    **Why (0.15.0):** on f1-predictions#1155 every cap below was prose the model had to remember, and every one failed differently across a 24-round, three-run loop: the per-run cap fired and the driver started "run 2" itself; the per-PR budget was never evaluated in the second run; the fix-induced counter was never mentioned in 17 rounds. Counters in a long context get skipped; a verdict printed by a script gets obeyed.
 5. Caps (defaults inside `loop-state.sh init`; override only if the user asks): `MAX_ITERATIONS=10` per run, `TIMEOUT_SECONDS=3600` per run, `MAX_PR_ROUNDS=12` per PR across all runs, `MAX_FIX_INDUCED_ROUNDS=3`, plus `AGENT_TIMEOUT_SECONDS=900` (per-agent wall-clock watchdog — see Phase 1 Step 4; not a loop-state key). These are caps, NOT budgets — do not reduce thoroughness to fit within them. `TIMEOUT_SECONDS` is evaluated only *between* rounds and cannot interrupt a hung round; `AGENT_TIMEOUT_SECONDS` is what bounds a single round's wall time.
 
-   **A run that exits on any cap is over for this session.** `MAX_ITERATIONS_REACHED`, `FIX_BUDGET_EXHAUSTED`, `TIMED_OUT`: post the wrap-up and stop. Never start a second run yourself to "review the last round's fixes" — that is exactly how #1155 went from 10 rounds to 17 in one session, and `loop-state.sh` refuses a second `init` in the same run dir for that reason. A new run needs a human: re-label in CI, or re-invoke the skill. `MAX_PR_ROUNDS` is the cap that survives that re-label (it counts every round the PR has ever had — Step 8), and it is what terminates a PR the loop cannot converge on; f1-predictions#623 spent 13 rounds across two runs without either reaching the per-run cap.
+   **A run that exits on any cap is over for this session.** `MAX_ITERATIONS_REACHED`, `FIX_BUDGET_EXHAUSTED`, `TIMED_OUT`: post the wrap-up and stop. Never start a second run yourself to "review the last round's fixes" — that is exactly how #1155 went from 10 rounds to 17 in one session, and `loop-state.sh` refuses a second `init` in the same run dir for that reason. A new run needs a human to re-invoke the skill. `MAX_PR_ROUNDS` is the cap that survives that re-run (it counts every round the PR has ever had — Step 8), and it is what terminates a PR the loop cannot converge on; f1-predictions#623 spent 13 rounds across two runs without either reaching the per-run cap.
 6. **Locate the bundled scripts.** This skill ships its helper scripts and prompt fragments next to this SKILL.md, under `scripts/` and `prompts/`. Set `SKILL_DIR` to **this skill's base directory** — the absolute path printed as "Base directory for this skill" when the skill loads (equivalently, the directory this SKILL.md lives in). Anchoring on the base dir works for **both** install layouts: standalone (`~/.claude/skills/pr-review-loop`) and plugin (`.../plugins/pr-review-loop/skills/pr-review-loop`).
 
    ```bash
@@ -80,8 +76,8 @@ If either is missing, stop and tell the user with the install link from the erro
    # ! -name '*__*' so a digit-leading repo namespace (e.g. 37signals__rails) is never matched.
    find /tmp/pr-review -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' ! -name '*__*' -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
-   # Namespace by repo, not just PR number: a long-lived runner container hosts
-   # several repos on ONE /tmp, so two repos' PR #12 must never share state — a
+   # Namespace by repo, not just PR number: one machine reviews several repos
+   # on ONE /tmp, so two repos' PR #12 must never share state — a
    # shared history.md would feed one repo's pushbacks into the other's review.
    PR_ROOT="/tmp/pr-review/${OWNER_REPO//\//__}/$PR_NUMBER"
    RUN_ID="$(date +%s)-$$"
@@ -96,7 +92,7 @@ If either is missing, stop and tell the user with the install link from the erro
 
    **Cross-call state — variables do NOT survive between bash calls.** Every bash snippet below runs in a fresh shell. Loop counters live in `$RUN_DIR/state` and are read back with `loop-state.sh get` (Step 4) — never carry them in your head. What does live in **your conversation** is the handful of paths and SHAs (`$SKILL_DIR`, `$RUN_DIR`, `$PACKET`, `$HISTORY`, `$ROUND_DIR`, `ROUND_BASE_SHA`, `SCOPED_THIS`): when you run a snippet, set every one it reads at the top of that same bash call (re-inline the literal values). Never paste a snippet whose variables you haven't defined in that call — an empty `$MARKER_CID` makes the marker deletion a silent no-op. The values that must survive even a fresh conversation are on disk: `$PR_ROOT/current-run` (this run's dir), `$PR_ROOT/marker-cid` (Phase 0.5 → Phase 5), and `$RUN_DIR/state` (every counter, plus `LAST_FIX_BASE_SHA` for the scoped delta).
 
-8. **Reconstruct history + read the fix budget (both PR-resident).** `$HISTORY` lives in `/tmp`, which dies on a container redeploy and is never shared between the laptop and the runner. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent. The same fetch also yields `PRIOR_ROUNDS`, the PR's lifetime round count, which is read on **every** run (not only when the local file is missing) because it is what the Phase 4 fix budget spends:
+8. **Reconstruct history + read the fix budget (both PR-resident).** `$HISTORY` lives in `/tmp`, which is never shared between the laptop and the devbox. But "All Prior Pushbacks" is the #1 anti-non-convergence device — losing it silently re-litigates settled disagreements. So the wrap-up (Phase 5) embeds the history verbatim inside an HTML-comment block, and Phase 0 rebuilds `$HISTORY` from the newest such block whenever the local file is absent. The same fetch also yields `PRIOR_ROUNDS`, the PR's lifetime round count, which is read on **every** run (not only when the local file is missing) because it is what the Phase 4 fix budget spends:
 
    ```bash
    HISTORY_IO="$SKILL_DIR/scripts/history-io.sh"
@@ -133,11 +129,11 @@ If either is missing, stop and tell the user with the install link from the erro
    # history-io.sh for why both exist and why max is the safe direction). Read
    # from every comment, not just the summary: since 0.15.0 the progress
    # comment carries the marker too, rewritten each round, so a run killed
-   # mid-loop (the CI cap, a crash) still leaves its rounds on the PR. 0 on a
+   # mid-loop (a crash, a killed session) still leaves its rounds on the PR. 0 on a
    # first run.
    # Same fail-visible handling as the history fetch above — this counter is
    # the PR-resident half of the fix budget, so a fetch failure that silently
-   # read as "no markers" would zero out the only source a fresh runner has
+   # read as "no markers" would zero out the only source a fresh host has
    # (no local $ROUNDS_FILE yet) and hand back a budget the PR already spent.
    # A warning alone doesn't prevent that: if the local file is ALSO absent,
    # falling back anyway means proceeding with an unverifiable PRIOR_ROUNDS —
@@ -170,17 +166,16 @@ If either is missing, stop and tell the user with the install link from the erro
 
    The PR is the durable copy; the local file is just the working copy. This makes pushback history a property of the PR, not the machine that happened to run the last loop.
 
-9. **In-flight guard — check (don't race another loop).** The runner's workflow `concurrency` serializes runner runs, but nothing stops a laptop loop racing a `review`-label runner loop on the same PR — both would push commits to the same branch. Here, only *check* for a live loop on another host and abort if found. `marker-blocks` exits 0 when a fresh marker from a different host holds the PR (its 75-min freshness window — just above the whole-loop `TIMEOUT_SECONDS` — treats anything older as a dead run):
+9. **In-flight guard — check (don't race another loop).** Nothing stops a laptop loop racing a devbox loop on the same PR — both would push commits to the same branch. Here, only *check* for a live loop on another host and abort if found. `marker-blocks` exits 0 when a fresh marker from a different host holds the PR (its 75-min freshness window — just above the whole-loop `TIMEOUT_SECONDS` — treats anything older as a dead run):
 
    ```bash
    HOST="$(hostname)"; NOW="$(date +%s)"
    # Don't silently treat a comment-read FAILURE as "no marker" — warn and fall
-   # back to best-effort (the guard is defense-in-depth atop the runner's
-   # workflow concurrency; a transient gh blip shouldn't hard-fail the loop, and
+   # back to best-effort (a transient gh blip shouldn't hard-fail the loop, and
    # if gh is truly down the packet build below fails loudly anyway).
    if ! existing="$(gh pr view "$PR_NUMBER" --json comments \
      -q '[.comments[].body | select(contains("pr-review-loop:running"))] | last // ""' 2>&1)"; then
-     echo "Warning: couldn't read PR comments to check for a concurrent loop ($existing) — proceeding without the in-flight guard. If a runner loop is also active on this PR, cancel one." >&2
+     echo "Warning: couldn't read PR comments to check for a concurrent loop ($existing) — proceeding without the in-flight guard. If a loop on another host is also active on this PR, cancel one." >&2
      existing=""
    fi
    if [ -n "$existing" ] && printf '%s' "$existing" | "$SKILL_DIR/scripts/history-io.sh" marker-blocks "$HOST" "$NOW"; then
@@ -209,7 +204,7 @@ Pre-extract everything agents need into `$PACKET`. Without this, each of the 3�
 
 After copying `$PACKET/CLAUDE.md`, read it and remove sections a code reviewer doesn't need (deployment, scheduling, planning/execution contracts, communication-style rules), keeping Project/Environment/Commands/Testing/Conventions/style limits. If a section's relevance is ambiguous, keep it — the goal is dropping obvious bulk, not aggressive pruning.
 
-**Diff artifacts — a script you re-run every round.** Claude pushes fix commits between rounds, so the diff changes; `refresh-packet.sh` regenerates `diff.patch`, the per-file `files/` splits, `manifest.txt`, `diff-wide.patch`, and `changed-files.txt`, and owns **base-ref resolution** (on a laptop the bare base branch exists locally; in a CI/runner head-only checkout it must resolve `origin/<base>` or fetch — it hard-fails rather than silently producing an empty packet). Call it here, and again at the top of every round (Phase 1 Step 0) — never hand-generate these artifacts:
+**Diff artifacts — a script you re-run every round.** Claude pushes fix commits between rounds, so the diff changes; `refresh-packet.sh` regenerates `diff.patch`, the per-file `files/` splits, `manifest.txt`, `diff-wide.patch`, and `changed-files.txt`, and owns **base-ref resolution** (the bare base branch if it exists locally, else `origin/<base>`, else a fetch — it hard-fails rather than silently producing an empty packet). Call it here, and again at the top of every round (Phase 1 Step 0) — never hand-generate these artifacts:
 
 ```bash
 "$SKILL_DIR/scripts/refresh-packet.sh" \
@@ -221,7 +216,7 @@ After copying `$PACKET/CLAUDE.md`, read it and remove sections a code reviewer d
 
 If it exits non-zero, stop and surface its error — do not improvise the artifacts by hand (hand-generated packets are the drift class the scripts exist to kill).
 
-**PR-size gate (0.15.0) — before the marker is posted.** A packet above ~3,000 added lines does not converge: #1155 started at 3,900 and fed five reviewers something new for 24 rounds, and the runner's 75-minute cap gets about three rounds on a packet that size. Measure it, excluding artifacts a reviewer does not read (JSON, CSV, notebooks, lockfiles, snapshots, minified/generated code, binaries — `diff-size.sh` has the list; add project-specific patterns with `PR_SIZE_EXCLUDE='<glob>:<glob>'`):
+**PR-size gate (0.15.0) — before the marker is posted.** A packet above ~3,000 added lines does not converge: #1155 started at 3,900 and fed five reviewers something new for 24 rounds, and the one-hour run cap gets about three rounds on a packet that size. Measure it, excluding artifacts a reviewer does not read (JSON, CSV, notebooks, lockfiles, snapshots, minified/generated code, binaries — `diff-size.sh` has the list; add project-specific patterns with `PR_SIZE_EXCLUDE='<glob>:<glob>'`):
 
 ```bash
 "$SKILL_DIR/scripts/diff-size.sh" \
@@ -240,7 +235,7 @@ An exit code outside `{0, 3}` is an operational failure (unresolvable base ref, 
 Read `verdict=` from `$RUN_DIR/size.txt`:
 - `OK` — continue.
 - `WARN` (≥ 1,500 counted lines) — tell the user the PR is large for a loop, name the counted total and the top files, and continue. Report it in the wrap-up's Overview.
-- `STOP` (≥ 2,500 counted lines; exit code 3) — **do not review.** Post a wrap-up now (Phase 5 template, status `PR_TOO_LARGE`) giving the counted and excluded totals, the top files, and the recommendation: split the PR, or — if the count is inflated by a file type the exclusion list misses — re-run with `PR_SIZE_EXCLUDE='<glob>'`. Carry the `pr-review-loop:summary` and `pr-review-loop:rounds {PRIOR_ROUNDS}` markers as usual (CI's reconcile needs the summary marker). No in-flight marker has been posted yet, so there is nothing to remove; stop after the post.
+- `STOP` (≥ 2,500 counted lines; exit code 3) — **do not review.** Post a wrap-up now (Phase 5 template, status `PR_TOO_LARGE`) giving the counted and excluded totals, the top files, and the recommendation: split the PR, or — if the count is inflated by a file type the exclusion list misses — re-run with `PR_SIZE_EXCLUDE='<glob>'`. Carry the `pr-review-loop:summary` and `pr-review-loop:rounds {PRIOR_ROUNDS}` markers as usual. No in-flight marker has been posted yet, so there is nothing to remove; stop after the post.
 
 The gate measures `git diff --numstat` against the same base ref the packet used (`$PACKET/base-ref.txt`), so a stale local base branch cannot inflate it any more than it could inflate the packet.
 
@@ -265,7 +260,7 @@ printf '🔒 pr-review-loop running on `%s` (auto-removed at loop end) <!-- pr-r
 
 `post-comment` writes `"<databaseId> <nodeId>"` to `--id-file` as part of the same operation that posts, so there is no window where a marker exists on the PR that nothing knows the id of. Phase 5 reads that file back. If this call **fails** (both APIs down), it exits non-zero and no marker was posted — stop and tell the user GitHub is unreachable; do not proceed to review with no lock.
 
-**Post the progress comment now** — a lightweight status table edited in place each round so anyone watching the PR can follow the loop's progress without waiting for the final summary. It carries a `<!-- pr-review-loop:progress -->` marker (deliberately NOT `pr-review-loop:summary`, so it can never satisfy reconcile). Phase 5 deletes it once the summary supersedes it.
+**Post the progress comment now** — a lightweight status table edited in place each round so anyone watching the PR can follow the loop's progress without waiting for the final summary. It carries a `<!-- pr-review-loop:progress -->` marker (deliberately NOT `pr-review-loop:summary`, so it can never be mistaken for the verdict). Phase 5 deletes it once the summary supersedes it.
 
 ```bash
 {
@@ -417,17 +412,17 @@ AGENT_TIMEOUT_SECONDS=$AGENT_TIMEOUT_SECONDS \
 
 The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent in parallel each under a watchdog, `wait`s, and writes `$ROUND_DIR/.done`. It runs the **core tier unconditionally** and refuses to `--skip` a core agent. `--sfh-effort medium` once `CONSECUTIVE_CLEAN_ROUNDS ≥ 1` (after a clean round the deep error-path trace rarely surfaces anything new); `high` otherwise.
 
-**Sandbox availability (locked-down containers).** If the environment variable `CODEX_SANDBOX_UNAVAILABLE` is set, `launch-agents.sh` overrides **every** agent's sandbox to `--dangerously-bypass-approvals-and-sandbox` (ignoring the per-role sandbox in its `role_config`). Some environments — notably unprivileged CI containers (e.g. a Railway-hosted self-hosted runner) — can't create the user namespaces Codex's `bubblewrap`/`landlock` sandbox needs, so **every** `codex exec` fails at sandbox setup (`Permission denied` creating a namespace) and the agents review nothing. (With the agent-failure detection in Step 5 these now surface as `AGENT_FAILED` rather than an ungrounded false-clean — but the round still does no real review, so the bypass is what lets it actually run.) Bypassing runs Codex with no OS sandbox and no approval prompts — acceptable **only** because such a runner is itself a locked-down, single-purpose, throwaway container (the container is the sandbox) reviewing trusted, same-repo PRs. When the var is unset (local/interactive), the per-role sandboxes apply unchanged so real sandboxing is in force. Export it before the `$LAUNCH_AGENTS` call:
+**Sandbox availability (locked-down containers).** If the environment variable `CODEX_SANDBOX_UNAVAILABLE` is set, `launch-agents.sh` overrides **every** agent's sandbox to `--dangerously-bypass-approvals-and-sandbox` (ignoring the per-role sandbox in its `role_config`). Some hosts — notably unprivileged containers, such as the devbox — can't create the user namespaces Codex's `bubblewrap`/`landlock` sandbox needs, so **every** `codex exec` fails at sandbox setup (`Permission denied` creating a namespace) and the agents review nothing. (With the agent-failure detection in Step 5 these now surface as `AGENT_FAILED` rather than an ungrounded false-clean — but the round still does no real review, so the bypass is what lets it actually run.) Bypassing runs Codex with no OS sandbox and no approval prompts — acceptable **only** on a host that is itself a locked-down, single-purpose container (the container is the sandbox) reviewing trusted, same-repo PRs. When the var is unset, the per-role sandboxes apply unchanged so real sandboxing is in force. Export it before the `$LAUNCH_AGENTS` call:
 
 ```bash
 [ -n "${CODEX_SANDBOX_UNAVAILABLE:-}" ] && export CODEX_SANDBOX_UNAVAILABLE   # the script reads it
 ```
 
-**After the batch returns, check one session header per model** — `head` a `$ROUND_DIR/log-<role>.txt` (first ~10 lines) and confirm `model`, `reasoning effort` and `reasoning summaries` match that role's `role_config` line (`concise` summaries, not `auto`). If they don't, debug the codex `-c` flags / CLI version before trusting the round. (On the runner the codex CLI can drift ahead of the laptop's — this check is the canary.)
+**After the batch returns, check one session header per model** — `head` a `$ROUND_DIR/log-<role>.txt` (first ~10 lines) and confirm `model`, `reasoning effort` and `reasoning summaries` match that role's `role_config` line (`concise` summaries, not `auto`). If they don't, debug the codex `-c` flags / CLI version before trusting the round. (The codex CLI on the devbox can drift from the laptop's — this check is the canary.)
 
-**Watchdog rationale (why the script wraps each agent in a deadline poll):** codex has no reliable internal wall cap, and the loop-level `TIMEOUT_SECONDS=3600` is checked only *between* rounds (Phase 4) — it cannot interrupt a round that is currently hung. Log analysis found the median agent finishes in 2–10 min, but a handful of rounds ran **28–167 minutes** because codex sat in API-degradation/network backoff (or the laptop slept mid-run); token counts were normal, so the time was pure stall — and those tails were ~⅔ of all review-loop wall time. The per-agent deadline `AGENT_TIMEOUT_SECONDS` (default 900s) sits far above every legitimate agent and far below every observed stall. The poll is **deadline-based, not `sleep N && kill`** (a sleep timer is itself suspended on machine sleep and would never fire; a deadline poll compares wall-clock each tick and kills on the first tick after wake) — this guards server-side network stalls on the runner as well as laptop sleep. A watchdog-killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-<role>.txt`; Step 5 treats that as "no findings this round."
+**Watchdog rationale (why the script wraps each agent in a deadline poll):** codex has no reliable internal wall cap, and the loop-level `TIMEOUT_SECONDS=3600` is checked only *between* rounds (Phase 4) — it cannot interrupt a round that is currently hung. Log analysis found the median agent finishes in 2–10 min, but a handful of rounds ran **28–167 minutes** because codex sat in API-degradation/network backoff (or the laptop slept mid-run); token counts were normal, so the time was pure stall — and those tails were ~⅔ of all review-loop wall time. The per-agent deadline `AGENT_TIMEOUT_SECONDS` (default 900s) sits far above every legitimate agent and far below every observed stall. The poll is **deadline-based, not `sleep N && kill`** (a sleep timer is itself suspended on machine sleep and would never fire; a deadline poll compares wall-clock each tick and kills on the first tick after wake) — this guards network stalls on any host as well as laptop sleep. A watchdog-killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-<role>.txt`; Step 5 treats that as "no findings this round."
 
-**Run `$LAUNCH_AGENTS` as ONE foreground bash call**, with a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS` (the CI runner sets a high `BASH_DEFAULT_TIMEOUT_MS` for this). The script blocks internally — it launches the batch, then `wait`s until every codex PID has completed or been watchdog-killed, then writes `$ROUND_DIR/.done` — so the whole round stays inside one turn. **Do NOT** background the launch and then stop/yield to "wait" for it: per the Runtime note above, a non-interactive `claude --print` run is never resumed, so a backgrounded batch is orphaned and killed the instant you stop and the loop dies with no summary. (If a single call would exceed your bash tool-timeout, poll in-turn instead: start `$LAUNCH_AGENTS` `nohup`-detached, then loop short `sleep`+check bash calls until `$ROUND_DIR/.done` exists — still never yielding the turn. **Bound that poll by a deadline** and treat expiry as a round failure, never as "keep waiting".)
+**Run `$LAUNCH_AGENTS` as ONE foreground bash call**, with a tool-timeout ≥ `AGENT_TIMEOUT_SECONDS`. The script blocks internally — it launches the batch, then `wait`s until every codex PID has completed or been watchdog-killed, then writes `$ROUND_DIR/.done` — so the whole round stays inside one turn. **Do NOT** background the launch and then stop/yield to "wait" for it — see the Runtime note above. (If a single call would exceed your bash tool-timeout, poll in-turn instead: start `$LAUNCH_AGENTS` `nohup`-detached, then loop short `sleep`+check bash calls until `$ROUND_DIR/.done` exists — still never yielding the turn. **Bound that poll by a deadline** and treat expiry as a round failure, never as "keep waiting".)
 
 **The poll-in-turn escape hatch above is for `$LAUNCH_AGENTS` only.** It is safe there for two specific reasons: the script writes `.done` as a discrete sentinel the instant it finishes, and it watchdog-kills its own agents, so the thing being polled is guaranteed to terminate. **Do not generalize it to other long-running commands** — build, typecheck, or test runs (see Phase 3 Step 4). Polling for one of those to finish re-creates the very hang the watchdog exists to prevent, because nothing is bounding the command itself. And never poll a file fed by a buffering pipeline: `cmd | tail -60` writes *nothing* until `cmd` reaches EOF, so a poll waiting for content in that file cannot succeed until the command it is waiting on has already exited.
 
@@ -556,23 +551,6 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - test-analyzer: fit_start_spread.py:725 — no wiring test proving main()
      passes strict=True
    ```
-
-   **You cannot push changes to `.github/workflows/*` when running in CI.** The
-   job's `GITHUB_TOKEN` is a GitHub App token, and the `workflows` permission is
-   not available to it — it isn't a key you can add to the workflow's
-   `permissions:` block, so no amount of config grants it. The push is rejected
-   server-side with *"refusing to allow a GitHub App to create or update workflow
-   … without `workflows` permission"*, and because the rejection lands at push
-   time, a fix committed first has to be unwound.
-
-   So **don't attempt it**: when a finding targets a workflow file and you're
-   running in CI, do not edit it. Route it to `## Remaining Suggestions` as an
-   explicit operator action — name the file, line, and the exact one-line change
-   — and say the loop's token cannot push workflow files. This is a deliberate
-   privilege boundary, not a misconfiguration: the loop executes PR code, so a
-   token that could rewrite CI would let reviewed code rewrite the pipeline that
-   runs on the default branch. On a laptop run (a human's own credentials) the
-   edit is fine — this restriction is CI-only.
 4. **In parallel with posting/reporting**, run **targeted validation** on this round's fix: the lint/format check, then the tests that cover the files changed this round. Commands come from CLAUDE.md / project config. **Targeted means:** every test file changed this round, plus every test file that imports a module changed this round (grep the test tree for the module path), plus any always-on smoke command the project names. Run the project's **full suite only** (a) on the final candidate — Phase 4's full-validation gate before a CLEAN exit — or (b) when this round's fix changed a shared production interface, default or config whose consumers a grep cannot enumerate, and say so in the round summary. If validation fails, fix, amend, force-push with `--force-with-lease`.
 
    **Why targeted (0.14.0):** a full suite after every narrow fix was the largest single cost in long loops — one 2026-09 loop ran a project's full backend suite five times at ~11 minutes each inside a 110-minute review. The final full run catches what the targeted runs missed; the intermediate ones only repeat it.
@@ -598,11 +576,11 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - **Never poll for a validation command to finish** — see the escape-hatch note in
      Phase 1 Step 4.
 
-   **Why this is spelled out:** a runner loop on a large PR ran a project's full test
+   **Why this is spelled out:** a loop on a large PR ran a project's full test
    suite unbounded. One test wedged at 0% CPU; the `| tail -60` pipe kept its log at
    zero bytes; the loop then started a 25-minute poll waiting for content in that
    file — which could not arrive until the very command it was waiting on exited.
-   The job died at CI's 75-minute cap. Round 0's reviews had **already completed
+   The run was killed at its wall-clock cap. Round 0's reviews had **already completed
    successfully**; the entire run was thrown away after the work was done, and no
    summary was ever posted.
 5. **Verbose mode**: post `CLAUDE:` response comment per `verbose-mode.md`. **Quiet mode**: report locally.
@@ -683,7 +661,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    | `CODEX_DEGRADED` | every agent watchdog-killed | Systemic Codex stall (Phase 1 Step 4). |
    | `TIMED_OUT` | `TIMEOUT_SECONDS` elapsed | Checked between rounds only. |
    | `MAX_ITERATIONS_REACHED` | `ITERATION >= MAX_ITERATIONS` | This run is over. **Do not start another** — Phase 0 Step 5. |
-   | `FIX_BUDGET_EXHAUSTED pr-rounds …` | `PRIOR_ROUNDS + ITERATION >= MAX_PR_ROUNDS` | The PR's lifetime budget; survives re-labels by design. |
+   | `FIX_BUDGET_EXHAUSTED pr-rounds …` | `PRIOR_ROUNDS + ITERATION >= MAX_PR_ROUNDS` | The PR's lifetime budget; survives re-runs by design. |
    | `FIX_BUDGET_EXHAUSTED fix-induced …` | three consecutive rounds whose findings were all fix-induced/coverage-only | Backstop for the triage exit, in case triage was skipped. |
 
    CLEAN sits above the caps in the script's order: a round that converged is CLEAN even if it was the last one the budget allowed.
@@ -733,7 +711,7 @@ GH_IO="$SKILL_DIR/scripts/gh-io.sh"   # re-set: fresh shell
 "$GH_IO" post-comment --repo "$OWNER_REPO" --pr "$PR_NUMBER" --body-file "$RUN_DIR/summary.md"
 ```
 
-**If that call exits non-zero, the loop has failed** — the whole point of the run is the verdict, and it did not reach the PR. Do not carry on to the marker removal and report success. Say so plainly in your final message to the user, print the summary you were trying to post so the work isn't lost, and report the run's status as failed. (In CI the workflow's reconcile step independently catches this — see "CI reconciliation" below — but a laptop run has no such backstop, so the honest report is yours to make.)
+**If that call exits non-zero, the loop has failed** — the whole point of the run is the verdict, and it did not reach the PR. Do not carry on to the marker removal and report success. Say so plainly in your final message to the user, print the summary you were trying to post so the work isn't lost, and report the run's status as failed. Nothing else checks this, so the honest report is yours to make.
 
 ```
 CLAUDE: Automated Review Summary
@@ -771,9 +749,9 @@ CLAUDE: Automated Review Summary
 -->
 ```
 
-The `pr-review-loop:summary` marker on the second line is **required in both modes** and must be byte-exact. It's how `gh-io.sh reconcile` (and the CI workflow) tells "the loop published its verdict" from "the loop died quietly" — the heading prose is not the contract, since a human comment can quote it. Keep it an HTML comment so it stays invisible in the rendered comment.
+The `pr-review-loop:summary` marker on the second line is **required in both modes** and must be byte-exact. It marks the comment as the loop's published verdict — the heading prose is not the contract, since a human comment can quote it. Keep it an HTML comment so it stays invisible in the rendered comment.
 
-The `pr-review-loop:rounds` marker is **required in both modes** and carries `PR_ROUNDS_TOTAL` (= `PRIOR_ROUNDS + ITERATION`) — the PR's lifetime review-round count, which is what makes the Phase 4 fix budget survive a re-label. Write the number as plain digits. Also persist the local copy in the same bash call that posts the wrap-up, so a re-run on the same runner doesn't need to re-read the PR. `PR_ROUNDS_TOTAL` lives in the state file, not in a bash variable that survives across calls (Phase 0 Step 7) — read it back explicitly rather than referencing a bare `$PR_ROUNDS_TOTAL`, or this write silently persists an empty counter in a fresh shell:
+The `pr-review-loop:rounds` marker is **required in both modes** and carries `PR_ROUNDS_TOTAL` (= `PRIOR_ROUNDS + ITERATION`) — the PR's lifetime review-round count, which is what makes the Phase 4 fix budget survive a re-run. Write the number as plain digits. Also persist the local copy in the same bash call that posts the wrap-up, so a re-run on the same host doesn't need to re-read the PR. `PR_ROUNDS_TOTAL` lives in the state file, not in a bash variable that survives across calls (Phase 0 Step 7) — read it back explicitly rather than referencing a bare `$PR_ROUNDS_TOTAL`, or this write silently persists an empty counter in a fresh shell:
 
 ```bash
 LOOP_STATE="$SKILL_DIR/scripts/loop-state.sh"; STATE="$RUN_DIR/state"   # re-set: fresh shell
@@ -783,7 +761,7 @@ printf '%s\n' "$PR_ROUNDS_TOTAL" > "$PR_ROOT/rounds-total"
 
 Both copies are written because either can be lost independently (see `history-io.sh`); Phase 0 takes the max. **Write them on every exit, not just `FIX_BUDGET_EXHAUSTED`** — a `TIMED_OUT` run's rounds count against the PR too, and skipping the write there is precisely how #623 would have escaped the budget.
 
-The trailing `pr-review-loop:history` block is **required in both modes** — it's the durable copy of "All Prior Pushbacks" + "Recent Rounds" that Phase 0 reconstructs from when a later loop runs on a fresh machine or after a container redeploy (see Phase 0 Step 8). It's an HTML comment, so it's invisible in the rendered comment. Paste `$HISTORY` verbatim between the markers; the `-->` must be on its own line so the extractor stops there.
+The trailing `pr-review-loop:history` block is **required in both modes** — it's the durable copy of "All Prior Pushbacks" + "Recent Rounds" that Phase 0 reconstructs from when a later loop runs on a different machine (see Phase 0 Step 8). It's an HTML comment, so it's invisible in the rendered comment. Paste `$HISTORY` verbatim between the markers; the `-->` must be on its own line so the extractor stops there.
 
 Also post inline comments on the diff for pushed-back items and remaining suggestions (reuse the inline-comment posting logic in `verbose-mode.md`, step 4, but only for these unresolved items).
 
@@ -796,9 +774,9 @@ This exit means "the loop stopped being productive", **not** "the PR is fine" an
 - **Say which budget ran out** — `MAX_PR_ROUNDS` (with `PRIOR_ROUNDS` + this run's rounds, so the count across runs is visible) or the `MAX_FIX_INDUCED_ROUNDS` streak.
 - **Flag the unreviewed state explicitly.** The last round's fixes were pushed but never reviewed — that is inherent to stopping here. Name those commits under "Commits" and say plainly that no reviewer has seen them.
 - **Characterise the spiral, don't re-list it.** One or two sentences on what the rounds kept circling (e.g. "each round added a link to the resume-safety chain and the next found a gap in that link"). The per-round detail is already in `$HISTORY`.
-- **Recommend, don't decide.** Typically: merge as-is if the remaining findings are acceptable, split the PR, or hand-review the last fixes. Do not mark ready, do not re-run the loop, and do not remove the `review` label.
+- **Recommend, don't decide.** Typically: merge as-is if the remaining findings are acceptable, split the PR, or hand-review the last fixes. Do not mark ready, and do not re-run the loop.
 
-Re-labelling after this exit *will* immediately re-exhaust the budget (the count is PR-resident by design). That is intentional: the next loop should start only after a human has changed something — split the PR, or reset the counter deliberately by editing the `pr-review-loop:rounds` marker on the newest summary comment and deleting `$PR_ROOT/rounds-total`.
+Re-running the loop after this exit *will* immediately re-exhaust the budget (the count is PR-resident by design). That is intentional: the next loop should start only after a human has changed something — split the PR, or reset the counter deliberately by editing the `pr-review-loop:rounds` marker on the newest summary comment and deleting `$PR_ROOT/rounds-total`.
 
 ### Reporting a `NEEDS_HUMAN_REVIEW` (diminishing-returns) exit
 
@@ -856,19 +834,15 @@ fi
 
 **Both modes**: report the final status and PR URL to the user.
 
-### CI reconciliation (why the marker is not the last word)
-
-`claude --print` exits 0 whenever the model produced text, so nothing about *this* skill's own exit can prove the loop finished. Under CI the workflow therefore runs `gh-io.sh reconcile` with `if: always()` after the loop: it removes any marker still standing and fails the job with `::error::` annotations if the summary never landed. That is the check that would have caught reduction#10, where two runs reported success over a locked PR with no verdict. Nothing here needs to *call* reconcile — just know that the `pr-review-loop:summary` marker and the `$PR_ROOT/marker-cid` file are the contract it reads, so don't hand-roll either.
-
 ## Bundled files
 
 - `scripts/refresh-packet.sh` — resolves the base ref and (re)generates the packet's diff artifacts, including `base-ref.txt` (Phase 0.5, Phase 1 Step 0)
 - `scripts/diff-size.sh` — the PR-size gate (warn 1,500 / stop 2,500 counted added lines, artifacts excluded) and the loop's test budget (`--since`) (Phase 0.5, Phase 3)
 - `scripts/loop-state.sh` — every loop counter and the exit decision: `init`, `get`, `set`, `triage`, `round-end`, `validation-fix` (Phase 0, 1, 2, 3, 4); tested by `selftest.sh`
 - `scripts/build-prompts.sh` — deterministically assembles agent prompts from `prompts/` fragments (Phase 1 Step 3)
-- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4); runs every agent `--ephemeral` when the installed CLI supports it (0.15.1) — reviewers are one-shots whose only outputs are the `-o` review file and `$RUN_DIR` log, and un-pruned rollouts under `$CODEX_HOME/sessions/` were filling the runner's volume
+- `scripts/launch-agents.sh` — launches the Codex batch under per-agent watchdogs; enforces the core tier; honors `CODEX_SANDBOX_UNAVAILABLE` (Phase 1 Step 4); runs every agent `--ephemeral` when the installed CLI supports it (0.15.1) — reviewers are one-shots whose only outputs are the `-o` review file and `$RUN_DIR` log, so un-pruned rollouts under `$CODEX_HOME/sessions/` would only fill the disk
 - `scripts/history-io.sh` — parses the PR-resident history block and in-flight markers (Phase 0 Steps 8–9); tested by `selftest.sh`
-- `scripts/gh-io.sh` — every GitHub **write** the loop makes (marker post, marker delete, summary post, progress comment post/edit/delete), with retry + a REST→GraphQL fallback; also the `reconcile` the CI workflow runs to prove the loop finished (Phase 0.5, Phase 5)
+- `scripts/gh-io.sh` — every GitHub **write** the loop makes (marker post, marker delete, summary post, progress comment post/edit/delete), with retry + a REST→GraphQL fallback (Phase 0.5, Phase 5)
 - `scripts/selftest.sh` — runnable coverage for all of the above (no repo CI; run `bash scripts/selftest.sh`)
 - `prompts/` — the prompt fragments: `_packet.txt`, `_history.txt`, `_severity-floor.txt`, `_scoped.txt` (scoped-verify addendum), and one persona file per agent
 - `agent-prompts.md` — documents the fragments and assembly order (no longer hand-assembled)

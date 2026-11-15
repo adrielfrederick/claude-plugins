@@ -35,25 +35,24 @@ parse_epoch() { sed -n 's/.*pr-review-loop:running [^ ]* \([0-9][0-9]*\).*/\1/p'
 
 # ── Fix budget: the PR's LIFETIME review-round count ────────────────────────
 # `ITERATION` resets to 0 in Phase 0 of EVERY run, so `MAX_ITERATIONS` bounds a
-# RUN, not a PR — removing and re-adding the `review` label hands the loop a
-# fresh budget, and a PR that never converges grinds on indefinitely, one run at
+# RUN, not a PR — re-invoking the loop hands it a fresh budget, and a PR that never converges grinds on indefinitely, one run at
 # a time. f1-predictions#623 took 13 rounds across two runs; neither run reached
-# 10, so nothing stopped it, and both died on the workflow wall clock having
-# posted no verdict at all.
+# 10, so nothing stopped it, and both died on the wall clock having posted no
+# verdict at all.
 #
 # The count therefore has to outlive the run. It is carried in TWO places with
 # different failure modes, and `rounds-total` takes the max:
-#   - a local file under $PR_ROOT — survives re-runs on a long-lived runner, but
-#     dies with the container.
+#   - a local file under $PR_ROOT — survives re-runs on the same host, but not
+#     a move to another one.
 #   - a `pr-review-loop:rounds N` marker in the PR's newest summary comment —
-#     survives a redeploy or a move to a different host, but not a deleted or
+#     survives a move to a different host, but not a deleted or
 #     hand-edited comment.
 # Max rather than "prefer one", because either source can be legitimately absent
 # and the failure that matters is UNDERCOUNTING: that silently hands back budget
 # the PR has already spent, which is the exact bug this exists to close.
 # MAX of every marker on stdin, not the first: since 0.15.0 the progress
 # comment carries the marker too (rewritten every round), so a run that dies
-# mid-loop still leaves its round count on the PR — the CI run on
+# mid-loop still leaves its round count on the PR — the run on
 # f1-predictions#1155 completed 7 rounds, posted no summary, and the next run
 # started from PRIOR_ROUNDS=0. Phase 0 now feeds every comment body in at once.
 # Anchored to a full, standalone marker line — line START through the closing

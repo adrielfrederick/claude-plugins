@@ -164,8 +164,7 @@ chmod +x "$BIN/codex"
 
 echo "== --ephemeral (probed per CLI) =="
 # codex exec persists a rollout per agent under $CODEX_HOME/sessions and never
-# prunes them — the runner's volume filled with them (0.15.1). Reviewers are
-# one-shots, so the launcher passes --ephemeral, but only when `codex exec
+# prunes them. Reviewers are one-shots, so the launcher passes --ephemeral, but only when `codex exec
 # --help` advertises it: an older laptop CLI that clears the gpt-6 floor must
 # keep launching, just persistently. The fakes below log their argv so the
 # check is on what codex was actually invoked with.
@@ -445,7 +444,7 @@ fi
 echo "== history-io.sh rounds (per-PR fix budget) =="
 # ITERATION resets every run, so MAX_ITERATIONS bounds a RUN and not a PR —
 # f1-predictions#623 spent 13 rounds across two runs without either reaching 10.
-# This counter is what survives a re-label, so UNDERCOUNTING silently hands back
+# This counter is what survives a re-run, so UNDERCOUNTING silently hands back
 # budget the PR has already spent. Every case below is a way that could happen.
 ROUNDS_MARKER='<!-- pr-review-loop:rounds 7 -->'
 printf '13\n'    > "$WORK/rounds-file.txt"
@@ -574,13 +573,13 @@ PATH="$BIN:$PATH" FAKE_BASE=main bash "$REFRESH" --repo "$FRD" --packet "$PKD" -
 check "refresh: dot-only PR splits the dotfile"    '[ -f "$PKD/files/.github__workflows__pr.yml.patch" ]'
 check "refresh: dot-only manifest is non-empty"    '[ -s "$PKD/manifest.txt" ]'
 check "refresh: dot-only manifest lists the split" 'grep -qx ".github__workflows__pr.yml.patch" "$PKD/manifest.txt"'
-# Runner case: no local base branch, but a remote-tracking ref exists.
+# No local base branch, but a remote-tracking ref exists.
 BASESHA="$(git -C "$FR" rev-parse main)"
 git -C "$FR" update-ref refs/remotes/origin/main "$BASESHA"
 git -C "$FR" branch -qD main
 out="$(PATH="$BIN:$PATH" FAKE_BASE=origin/main bash "$REFRESH" --repo "$FR" --packet "$PK" --pr 1 --base main)"
 check "refresh: falls back to origin/<base>" 'printf "%s" "$out" | grep -q "base=origin/main"'
-# Runner case #2 (the head-only checkout the fallback exists for): no local
+# Head-only checkout (the case the fetch fallback exists for): no local
 # main AND no remote-tracking origin/main, but an origin remote HAS main, so an
 # explicit `git fetch origin main` resolves it to FETCH_HEAD. Separate fixture
 # with a real bare origin so the fetch actually succeeds.
@@ -888,69 +887,8 @@ check "gh-io: edit rejects empty body" \
   '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" edit-comment --repo o/r --cid 101 --body-file /dev/null 2>/dev/null'
 FAKE_BODY="$BODYF"
 
-# newest-comment-id: the monotonic baseline reconcile scopes its check with.
-reset_store
-check "gh-io: newest-comment-id is 0 on an empty PR" \
-  '[ "$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" newest-comment-id --repo o/r --pr 7 2>/dev/null)" = "0" ]'
-PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" >/dev/null 2>&1
-check "gh-io: newest-comment-id returns the max" \
-  '[ "$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" newest-comment-id --repo o/r --pr 7 2>/dev/null)" = "101" ]'
-
-echo "== gh-io.sh reconcile (the reduction#10 regression) =="
-SUMF="$WORK/summary-body.txt"
-printf 'CLAUDE: Automated Review Summary\nStatus: CLEAN\n<!-- pr-review-loop:summary -->\n' > "$SUMF"
-
-# Exactly the reduction#10 end state: marker still up, summary never posted.
-reset_store
-FAKE_BODY="$BODYF"
-PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
-rec="$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --id-file "$IDF" --after 100 2>&1)"; rc=$?
-check "reconcile: exits nonzero on the orphaned-lock end state" '[ "$rc" -ne 0 ]'
-check "reconcile: annotates the leftover lock"   'printf "%s" "$rec" | grep -q "::error title=pr-review-loop lock left behind::"'
-check "reconcile: annotates the missing summary" 'printf "%s" "$rec" | grep -q "::error title=pr-review-loop summary missing::"'
-check "reconcile: actually removes the lock"     'jq -e "length == 0" "$GS" >/dev/null'
-check "reconcile: clears the --id-file"          '[ ! -f "$IDF" ]'
-
-# Reconcile must be able to clean up during the very incident that strands the
-# lock — REST down is when it is needed most.
-reset_store
-PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
-PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=rest-down bash "$GHIO" reconcile --repo o/r --pr 7 --id-file "$IDF" --after 100 >/dev/null 2>&1
-check "reconcile: removes the lock over GraphQL when REST is down" 'jq -e "length == 0" "$GS" >/dev/null'
-
-# The mirror case exercises the REST comment-list fallback, which is otherwise
-# dead code (reconcile reads via GraphQL first). `gh api --slurp` is rejected
-# alongside `--jq`, so this is the test that keeps that path honest.
-reset_store
-PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$BODYF" --id-file "$IDF" >/dev/null 2>&1
-rec="$(PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=graphql-down bash "$GHIO" reconcile --repo o/r --pr 7 --id-file "$IDF" --after 100 2>&1)"
-check "reconcile: lists over REST when GraphQL is down" 'printf "%s" "$rec" | grep -q "lock left behind"'
-check "reconcile: removes the lock over REST when GraphQL is down" 'jq -e "length == 0" "$GS" >/dev/null'
-
-# A properly finished loop: marker removed, summary posted → silent success.
-reset_store
-FAKE_BODY="$SUMF"
-PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$SUMF" >/dev/null 2>&1
-check "reconcile: clean loop exits 0" \
-  'PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --after 100 2>/dev/null'
-
-# --after is what scopes the check to THIS run: a summary from an EARLIER loop
-# on the same PR must not vouch for a run that posted nothing. Without this the
-# second reduction#10 run would have passed on the first run's comment.
-check "reconcile: a stale summary below --after does not count" \
-  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --after 101 2>/dev/null'
-
-# The token, not the prose, is the contract — a human comment quoting the
-# summary's heading must not satisfy the check.
-reset_store
-FAKE_BODY="$WORK/prose.txt"
-printf 'I looked for the CLAUDE: Automated Review Summary and it never showed up.\n' > "$WORK/prose.txt"
-PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" post-comment --repo o/r --pr 7 --body-file "$WORK/prose.txt" >/dev/null 2>&1
-check "reconcile: prose about the summary is not a summary" \
-  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" FAKE_MODE=ok bash "$GHIO" reconcile --repo o/r --pr 7 --after 100 2>/dev/null'
-
-check "gh-io: bad --repo dies"  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" newest-comment-id --repo notaslug --pr 7 2>/dev/null'
-check "gh-io: bad --pr dies"    '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" newest-comment-id --repo o/r --pr x 2>/dev/null'
+check "gh-io: bad --repo dies"  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" post-comment --repo notaslug --pr 7 --body-file "$BODYF" 2>/dev/null'
+check "gh-io: bad --pr dies"    '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" post-comment --repo o/r --pr x --body-file "$BODYF" 2>/dev/null'
 check "gh-io: empty body dies"  '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" post-comment --repo o/r --pr 7 --body-file /dev/null 2>/dev/null'
 check "gh-io: unknown subcommand dies" '! PATH="$BIN:$PATH" FAKE_STORE="$GS" bash "$GHIO" frobnicate 2>/dev/null'
 fi
@@ -1181,7 +1119,7 @@ check "size: selftest.sh is recognized as a test path" \
   '[ "$(printf "%s" "$out" | sed -n "s/^loop_test_added=//p")" = "6" ] && [ "$(printf "%s" "$out" | sed -n "s/^loop_prod_added=//p")" = "0" ]'
 
 echo "== 0.15.0 wiring (rounds across comments, base-ref hand-off, prompt rules) =="
-# The CI run on #1155 completed 7 rounds, died on the wall clock, and the next
+# The run on #1155 completed 7 rounds, died on the wall clock, and the next
 # run started from PRIOR_ROUNDS=0: the count lived only in a summary that was
 # never posted. The progress comment now carries the marker too, and Phase 0
 # reads the MAX across every comment.
