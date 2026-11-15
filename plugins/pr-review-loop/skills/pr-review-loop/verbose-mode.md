@@ -131,6 +131,6 @@ EOF
 
 (The heredoc is quoted (`<<'EOF'`), so fill the `{…}` placeholders in as you write the file rather than relying on shell expansion.)
 
-The `pr-review-loop:summary` marker on line 2 is **required** and byte-exact — `gh-io.sh reconcile` and the CI workflow use it to tell a published verdict from a loop that died quietly, and verbose runs are checked exactly like quiet ones.
+The `pr-review-loop:summary` marker on line 2 is **required** and byte-exact — it marks the comment as the loop's published verdict, exactly as in quiet mode.
 
 The trailing `pr-review-loop:history` block is **required** (same rule as the quiet-mode wrap-up, SKILL.md Phase 5) — it is the durable copy Phase 0 reconstructs pushback history from on a fresh machine. Paste `$HISTORY` verbatim; the `-->` must be on its own line.

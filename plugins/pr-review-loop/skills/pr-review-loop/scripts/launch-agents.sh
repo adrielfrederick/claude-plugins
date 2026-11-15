@@ -79,8 +79,7 @@ esac
 # inside the round's slowest agent. No role runs at xhigh or astra-medium:
 # the batch waits for its slowest agent, and those would double every round.
 # Before 0.8.0 the heavy roles had an empty -m and tracked the ambient config
-# default — non-deterministic across the laptop and the runner, which has no
-# config.toml. Pinning makes the review models identical everywhere. Every
+# default — non-deterministic across hosts with different config.toml files. Pinning makes the review models identical everywhere. Every
 # gpt-6-* model needs codex >= MIN_CODEX_FOR_GPT6 (enforced below).
 role_config() {
   case "$1" in
@@ -102,7 +101,7 @@ role_config() {
 # reads like a plan problem, not a version one. 0.156.1 is the first release
 # with sol/luna and was verified on 2026-09-24 against every pin above. Guard
 # here — colocated with the model pins, the single source of truth — so a stale
-# codex (e.g. an un-rebuilt runner image) fails fast with one clear line instead
+# codex fails fast with one clear line instead
 # of every agent 400ing mid-round and surfacing as AGENT_FAILED.
 MIN_CODEX_FOR_GPT6="0.156.1"
 require_codex_version() {
@@ -111,15 +110,13 @@ require_codex_version() {
   [ -n "$have" ] || die "could not read codex version (need >= $min for the gpt-6 models)"
   # have >= min  ⟺  min is the smaller (or equal) of the two under version sort.
   if [ "$(printf '%s\n%s\n' "$min" "$have" | sort -V | head -1)" != "$min" ]; then
-    die "codex $have is too old for the gpt-6 models (need >= $min). Run 'codex update' on a laptop, or rebuild the pr-runner image on the server."
+    die "codex $have is too old for the gpt-6 models (need >= $min). Run 'codex update'."
   fi
 }
 
 # Session persistence. `codex exec` writes a full rollout transcript of every
 # agent run under $CODEX_HOME/sessions/ (plus thread-history rows in its SQLite
-# state) and never prunes them. On the always-on runner that volume went from
-# 0.9 GB to 2.6 GB in a month (5,440 rollouts by 2026-09-17, per-session size
-# tripling after the codex 0.153 rebuild). Reviewers are stateless one-shots
+# state) and never prunes them. Reviewers are stateless one-shots
 # whose only outputs are the -o review file and the log in $RUN_DIR, so nothing
 # reads those rollouts — run ephemeral wherever the CLI supports it. Probed
 # rather than assumed so a laptop CLI that clears the gpt-6 floor but lacks
@@ -221,12 +218,12 @@ launch() {
   sandbox="${cfg%%|*}"; cfg="${cfg#*|}"
   model="${cfg%%|*}"; effort="${cfg##*|}"
 
-  # Locked-down CI containers (e.g. an unprivileged Railway runner) can't create
+  # Locked-down unprivileged containers (e.g. the devbox) can't create
   # the user namespaces Codex's bubblewrap/landlock sandbox needs, so every
   # codex exec fails at sandbox setup. When the host signals this via
   # CODEX_SANDBOX_UNAVAILABLE, bypass the OS sandbox + approvals for every agent.
-  # Safe only because such a runner is a throwaway container (the container is
-  # the sandbox) reviewing trusted same-repo PRs. See SKILL.md Phase 1 Step 4.
+  # Safe only on a single-purpose container (the container is the sandbox)
+  # reviewing trusted same-repo PRs. See SKILL.md Phase 1 Step 4.
   if [ -n "${CODEX_SANDBOX_UNAVAILABLE:-}" ]; then
     sandbox="--dangerously-bypass-approvals-and-sandbox"
   fi

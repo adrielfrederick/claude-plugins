@@ -172,7 +172,7 @@ done
 case "$cmd" in
   init)
     [ -n "$STATE" ] || die "--state is required"
-    [ ! -e "$STATE" ] || die "state file already exists: $STATE — a run is initialised once. If the previous run of this loop exited on a cap, this session is done: a new run needs a human re-label / re-invocation, not a second init."
+    [ ! -e "$STATE" ] || die "state file already exists: $STATE — a run is initialised once. If the previous run of this loop exited on a cap, this session is done: a new run needs a human to re-invoke the loop, not a second init."
     [ -n "$ROUNDS_FILE" ] || die "--rounds-file is required (the PR-lifetime round counter, \$PR_ROOT/rounds-total)"
     req_num --prior-rounds "$PRIOR"
     req_num --max-iterations "$MAXI"; req_num --max-pr-rounds "$MAXPR"
@@ -257,7 +257,7 @@ case "$cmd" in
 
   round-end)
     load
-    [ -z "$(sget EXIT_STATUS)" ] || die "this run already exited $(sget EXIT_STATUS) ($(sget EXIT_REASON)) — no further rounds. A new run needs a human re-label / re-invocation."
+    [ -z "$(sget EXIT_STATUS)" ] || die "this run already exited $(sget EXIT_STATUS) ($(sget EXIT_REASON)) — no further rounds. A new run needs a human to re-invoke the loop."
     req_num --criticals "$CRIT"; req_num --findings "$FIND"
     req_num --fix-induced "$FIXI"; req_num --coverage-only "$COV"; req_num --pushed-back "$PUSHED"
     req_num --fixed "$FIXED"; req_num --unreachable "$UNREACH"
