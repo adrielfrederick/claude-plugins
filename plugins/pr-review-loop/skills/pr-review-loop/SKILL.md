@@ -351,7 +351,7 @@ Every review round launches **one parallel batch** — there is no serial "secon
 **Core tier — always, every round, all parallel:**
 `code-reviewer`, `test-analyzer`, `silent-failure-hunter`.
 
-These three run on every round regardless of diff size. `type-design-analyzer` was core until 0.16.0. It left because an audit of 706 f1-predictions PRs found that ~95% of the findings it got accepted guarded states no real caller could produce, and accepting them made the loop add validators to internal-only types. It is now a judgment add-on (below).
+These three run on every round regardless of diff size. `type-design-analyzer` is a judgment add-on (below), not core: on internal-only types nearly all its findings guard states no real caller can produce.
 
 **Conditional add-on — `failure-pattern-analyst`:** `launch-agents.sh` runs it by default. When `$PACKET/failure-patterns.md` is absent, pass `--skip failure-pattern-analyst` (the persona self-short-circuits, but skipping avoids the launch cost).
 
@@ -423,7 +423,7 @@ The script reads `$ROUND_DIR/prompt-<role>.txt`, launches every selected agent i
 [ -n "${CODEX_SANDBOX_UNAVAILABLE:-}" ] && export CODEX_SANDBOX_UNAVAILABLE   # the script reads it
 ```
 
-**CRITICAL: After the first agent finishes, check its session header** — `head` the corresponding `$ROUND_DIR/log-<role>.txt` (first ~10 lines) and verify `reasoning effort` and `reasoning summaries` show the intended values, not defaults. If they show `high`/`auto` when you asked for something else, stop and debug the codex `-c` flags / CLI version before trusting the round. (On the runner the codex CLI can drift ahead of the laptop's — this check is the canary.)
+**After the batch returns, check one session header per model** — `head` a `$ROUND_DIR/log-<role>.txt` (first ~10 lines) and confirm `model`, `reasoning effort` and `reasoning summaries` match that role's `role_config` line (`concise` summaries, not `auto`). If they don't, debug the codex `-c` flags / CLI version before trusting the round. (On the runner the codex CLI can drift ahead of the laptop's — this check is the canary.)
 
 **Watchdog rationale (why the script wraps each agent in a deadline poll):** codex has no reliable internal wall cap, and the loop-level `TIMEOUT_SECONDS=3600` is checked only *between* rounds (Phase 4) — it cannot interrupt a round that is currently hung. Log analysis found the median agent finishes in 2–10 min, but a handful of rounds ran **28–167 minutes** because codex sat in API-degradation/network backoff (or the laptop slept mid-run); token counts were normal, so the time was pure stall — and those tails were ~⅔ of all review-loop wall time. The per-agent deadline `AGENT_TIMEOUT_SECONDS` (default 900s) sits far above every legitimate agent and far below every observed stall. The poll is **deadline-based, not `sleep N && kill`** (a sleep timer is itself suspended on machine sleep and would never fire; a deadline poll compares wall-clock each tick and kills on the first tick after wake) — this guards server-side network stalls on the runner as well as laptop sleep. A watchdog-killed agent leaves a `WATCHDOG_KILLED` sentinel in its `review-<role>.txt`; Step 5 treats that as "no findings this round."
 
@@ -513,12 +513,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
    - **Fix-induced findings (Phase 2's bucket) are declines.** When one arrives in a round that still has substantive findings, so the diminishing-returns exit didn't fire, decline it: "also cover case X" and "widen the check" on code an earlier fix added are not bugs. A real bug *in* that fix — a wrong output, a crash, a broken caller — is substantive, and gets fixed.
    - **Size the fix to the failure:** make the smallest change that closes the reachable failure. Don't add a validator, exception type or docstring that outweighs the logic it describes.
 
-   **Why (0.16.0):** an audit of 706 f1-predictions PRs found:
-   - The implementer fixed 82% of findings, and 42% of loops ended with no pushback at all.
-   - About 22% of fixes guarded triggers that couldn't occur. Most sat in operator-run tooling, and 220 of 647 later-round fixes rewrote an earlier fix's lines.
-   - About 40% of fixes were real defects, so "push back more" across the board would lose real catches.
-   - The asymmetry was the cause: pushbacks needed evidence and fixes needed none. So the implementer declined on scope and convention but almost never on reachability.
-   - Nearly all of that data predates 0.15.0. The coverage-only rules below address the test share; speculative production guards (~19% of all fixes) were untouched until this rule.
+   **Why:** when pushbacks need evidence and fixes need none, the loop accepts guards against triggers that cannot occur (about a fifth of all fixes in a 706-PR audit, mostly in operator-run tooling), while roughly 40% of fixes are real defects. The answer is a reachability test, not more pushback across the board.
 
    Then respond to each finding: **Agree** (fix it), **Partially agree** (modified fix), or **Disagree** (pushback with written reasoning). A pushback must **cite the evidence that defeats the finding** — the specific code line, existing guard, type/constant, caller, or project convention that makes it wrong, already handled or unreachable — not just assert judgment. If you can't point to concrete evidence for either a fix's trigger or a pushback, ask rather than hand-wave. (These citations become the "All Prior Pushbacks" entries reviewers must clear a higher bar to re-raise, so they need to actually hold up.) Tag a reachability decline `(unreachable)` in its history entry so later rounds and the wrap-up can tell it apart from other pushbacks.
 
@@ -693,7 +688,7 @@ If **every** agent this round was watchdog-killed, follow the systemic-degradati
 
    CLEAN sits above the caps in the script's order: a round that converged is CLEAN even if it was the last one the budget allowed.
 
-   **Fix-induced findings get no special CLEAN** (0.7.0, unchanged): a round that fixed anything is never CLEAN on its own say-so — Codex reviews the pushed state next round, scoped or full per `LAST_FIX_CLASS`. What 0.15.0 changed is that a round consisting *only* of such findings is no longer fixed at all (Phase 2 triage). **Removed in 0.15.0:** the "3 consecutive CRITICAL-free rounds ⇒ CLEAN" exit — it could fire on a round that changed code, shipping fixes no reviewer had seen. The streak still raises the severity floor (`≥ 2`) and drops the silent-failure-hunter to medium effort (`≥ 1`).
+   **A round that fixed anything is never CLEAN on its own say-so** — Codex reviews the pushed state next round, scoped or full per `LAST_FIX_CLASS`, so no fix ships unreviewed. A round consisting *only* of fix-induced or coverage-only findings is not fixed at all (Phase 2 triage). A streak of CRITICAL-free rounds is not an exit; it raises the severity floor (`≥ 2`) and drops the silent-failure-hunter to medium effort (`≥ 1`).
 
    Once `round-end` has printed an `EXIT`, it refuses further calls for this run. That is deliberate.
 
