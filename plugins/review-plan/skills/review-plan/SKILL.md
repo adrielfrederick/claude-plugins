@@ -178,7 +178,7 @@ Verdict: ready | needs revision | stop review
 
 Rules for reviewer blocks — they are read by the author and by later reviewers, and every byte costs a pass:
 - Findings only. No method narration, no "confirmed sound" lists, no restating the plan or prior findings. A verified ruling is one line. The block ends at the last finding or ruling — no "no other findings", no "verified against the codebase" summary, no closing paragraph of any kind. (Reviewers add these unless told not to; the rule is here because they did.)
-- At most ~120 words per finding. Claim, evidence, change — nothing else.
+- Each finding is claim, evidence, change — nothing else.
 - Every finding cites a plan section and a file:line (or the exact query/command) — verify against the codebase, do not speculate.
 - No findings in your scope this pass: write `No findings.` under `### Findings`.
 - IDs: `P<pass>-<dim><n>`, numbered from 1 within your block.
@@ -230,7 +230,7 @@ You are reviewing a software development plan. You evaluate the plan against you
 ## Rules
 
 1. Verify claims against the actual codebase before flagging them. Read the code; do not speculate.
-2. Findings only. No narration of your method, no lists of things you confirmed are fine, no restating the plan or earlier findings. At most ~120 words per finding: claim, evidence (file:line or the exact query), and the concrete change the plan needs. The block ends at the last finding or ruling — no "no other findings", no "verified against the codebase" summary.
+2. Findings only. No narration of your method, no lists of things you confirmed are fine, no restating the plan or earlier findings. Each finding is a claim, its evidence (file:line or the exact query), and the concrete change the plan needs. The block ends at the last finding or ruling — no "no other findings", no "verified against the codebase" summary.
 3. A finding that names no concrete change is non-blocking.
 4. Do not re-raise a ledger row that is `verified`, `conceded`, `withdrawn` or `duplicate` unless you have new evidence the earlier ruling missed. Do not re-raise a `pushed-back` row unless you can answer the author's reasoning; say `conceded` if you cannot.
 5. Get the timestamp from `date '+%Y-%m-%d %H:%M %Z'`.
@@ -327,8 +327,6 @@ Focus exclusively on whether the plan covers its implementation scope end-to-end
 - If the project has sprint/variant paths (e.g., mobile vs desktop, standard vs premium), are all variants covered?
 - Does the plan end with `## Operator forks` and `## Live gates` sections? Flag if either is missing. Flag any fork that is actually resolvable by evidence or existing convention (the author should decide it, not defer it to the operator). Flag any step touching real money, production data/config, or irreversible external effects that is absent from Live gates.
 - Does the plan open with `## Objective` ending in **Success criteria**? Flag if it is missing, if the objective is phrased as work rather than outcome, or if any criterion cannot be checked after execution. Do not judge here whether the design will meet the criteria — that is the holistic reviewer's question; yours is whether the section exists and is checkable.
-
-Be direct and actionable. Separate blocking concerns from minor follow-ups. Prefer concrete examples over generic criticism. Verify your claims against the actual codebase.
 ```
 
 ### Dimension 2: Data Model & Storage Accuracy
@@ -343,8 +341,6 @@ Focus exclusively on whether the plan's references to data models, schemas, and 
 - If the plan proposes new fields or models, check they don't conflict with existing ones.
 - If the plan reads from or writes to storage (DB, files, cache, APIs), verify the assumed data shape matches reality.
 - Check that nullable/optional fields are handled correctly — does the plan assume a field is always present when it could be null?
-
-Be direct and actionable. Every finding must reference the specific file and line/definition you checked. Do not speculate — read the code and verify.
 ```
 
 ### Dimension 3: Code Quality & Reuse
@@ -361,7 +357,7 @@ Focus exclusively on design quality and reuse of existing code:
 - Are there brittle sequencing assumptions (step A must complete before step B) that aren't enforced in the design?
 - Does the plan follow the project's existing patterns and conventions?
 
-Be direct and actionable. When flagging duplication, name the existing module/function that should be reused and its file path.
+When flagging duplication, name the existing module/function that should be reused and its file path.
 ```
 
 ### Dimension 4: Testing & Verification
@@ -378,7 +374,7 @@ Focus exclusively on whether the plan's testing and verification strategy matche
 - Are there data-contract or integration boundaries that need contract tests?
 - Does the plan specify how to verify the changes work end-to-end, not just that tests pass?
 
-Be direct and actionable. When suggesting a missing test, describe the specific scenario and expected behavior — don't just say "add more tests."
+When suggesting a missing test, describe the specific scenario and expected behavior — don't just say "add more tests."
 ```
 
 ### Dimension 5: Project Failure Patterns (conditional, Sonnet)
@@ -391,7 +387,7 @@ documents recurring bug classes specific to this codebase. For each pattern in
 that file:
 
 1. Read the pattern's "Triggers when" condition. Determine whether this plan
-   matches. If not, move on — DO NOT report the pattern.
+   matches. If not, move on without reporting it.
 2. If the pattern triggers, read its "What to check" guidance and evaluate
    whether the plan addresses it. Cite file:line evidence from the codebase
    when flagging gaps.
@@ -476,21 +472,3 @@ Number new findings P{N}-H1, P{N}-H2, ... Use `Verdict: stop review` when every 
 - Reviewers write blocks to `$SCRATCH/pass-N/`, never to the review document. Only the orchestrator writes the review document, so the transcript is always in pass order and a block can never land after its response. `/tmp` is per-host and per-boot; the transcript in the repo is the durable record.
 - If an agent fails or times out, note the gap in the transcript and continue with the blocks you have. Never treat a missing block as `ready`.
 - The ledger is the single source of truth for review state. The transcript is the audit trail. A reviewer that wants the history reads the ledger first and the transcript only for the reasoning behind a specific row.
-
-## What changed in 0.6.3 (and why)
-
-The launcher probes the Codex sandbox before launching. The first real pass 6 on the devbox produced a well-formed block that said Codex could read nothing: every shell command had died at sandbox setup (`bwrap: loopback: Failed RTM_NEWADDR`), a failure the pre-release smoke test could not see because a prompt that only replies never enters the sandbox. The probe runs one command through the same sandbox and skips the pass with the error and the host fix when it fails. The host fix on Ubuntu 24.04 is the system `bubblewrap` package; no sandbox bypass was added (see Notes).
-
-## What changed in 0.6.0 (and why)
-
-A sixth pass: a single Codex `gpt-6-astra` (high effort) review that runs after the Claude loop exits for any reason, reads the converged plan plus the whole ledger, rules on any still-open blocking rows, and gets one author response with no re-verification. Passes 1–5 share one model family and one rubric set, so their misses correlate; a different model on the finished plan is cheap independent signal. It is last so it sees the converged plan, and it has no verify pass so the loop stays bounded — its fixes are reported as unverified, and a pushed-back or design-changing pass-6 row goes to the operator. The pass is optional at runtime: a missing or failing Codex CLI is a noted gap, never a failed review.
-
-An efficacy question. Reading the rubrics side by side showed that no reviewer asked whether executing the plan would produce its intended outcome: Scope checks the work is fully specified, Testing checks the verification strategy, and the holistic pass repeated the four dimensions. A plan could pass every rubric and build the wrong thing. Two changes close that: the plan contract now requires an opening `## Objective` section with checkable success criteria, so the goal is the writer's explicit statement rather than the reviewer's inference; and the holistic rubric gains an **Outcome & Efficacy** section that traces each change to each criterion and asks what would let the plan succeed on its own terms yet miss the objective. It sits in the holistic pass, not a fifth dimension agent, because the question needs the whole plan in view. The Codex pass inherits the rubric and is told to weight that section most, which also makes pass 6 a different lens from pass 3 rather than a second run of the same one. Scope now checks only that the section exists and is checkable.
-
-## What changed in 0.5.0 (and why)
-
-The review document moved from beside the plan into a `reviews/` subdirectory (step 2). In one repo, 93 review transcripts sat interleaved with 106 plans in a single directory: nearly half the files and half the text in the folder a reader browses to find a plan, and cited by almost nothing outside the plan itself. A re-review of a plan whose review is still at the old location moves that file into `reviews/` instead of starting a second one.
-
-## What changed in 0.4.0 (and why)
-
-Measured over 89 loops in one repo: pass duration did not grow with the review file, but loops grew from a median 3 passes to 5 because exit needed every reviewer to say `ready` in the same pass, and every pass was a full re-review by fresh agents that re-explored the codebase. Blocking findings decayed 6 → 4 → 2 → 1 → 0 per pass, so the last one or two passes were confirmation passes. 0.4.0 makes exit ledger-driven (no non-terminal blocking finding), turns passes 2, 4 and 5 into scoped verifies that resume the original reviewer, caps reviewer prose to findings only, moves block writes out of the shared file, and adds a plan word budget that trims and warns rather than refuses — a long plan is usually recording decisions instead of directing work.

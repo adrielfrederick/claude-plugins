@@ -34,7 +34,7 @@ Personas (one file per agent, the filename is the role name):
    its place in a stack/arc, and explicit non-goals (e.g. "PR3 of 3, frontend
    only; backend already shipped in #469 — do not flag missing backend logic").
    It rides under a fixed header so the canonical blocks stay byte-exact. Claude
-   MAY write `$RUN_DIR/context.txt`; everything else is fixed.
+   MAY write `$ROUND_DIR/context.txt`; everything else is fixed.
 4. **`_scoped.txt`** — only when `--scoped` is passed (scoped verify rounds);
    sits directly before the persona so the delta-focus instruction is the last
    framing the persona reads under.
@@ -53,10 +53,10 @@ version on any behavioral edit (per repo CLAUDE.md).
 - **code-reviewer** (full-auto): guideline compliance, bugs, quality.
 - **test-analyzer** (full-auto): behavioral coverage gaps. Since 0.15.0 a coverage gap is a SUGGESTION unless it exposes a bug in current code or covers a CRITICAL fixed this loop; at most one IMPORTANT per round after round 0; never a test for the previous round's fix.
 - **silent-failure-hunter** (read-only): swallowed errors, masked failures.
-- **type-design-analyzer** (read-only, mini, judgment add-on): invariants a
+- **type-design-analyzer** (read-only, judgment add-on): invariants a
   real caller or external input can violate, at trust boundaries.
-- **comment-analyzer** (read-only, mini): comment/doc accuracy.
-- **code-simplifier** (read-only, mini): clarity-preserving simplification.
+- **comment-analyzer** (read-only): comment/doc accuracy.
+- **code-simplifier** (read-only): clarity-preserving simplification.
 - **failure-pattern-analyst** (read-only): project-local `failure-patterns.md`
   bug classes; self-short-circuits if the file is absent.
 

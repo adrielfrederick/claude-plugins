@@ -9,7 +9,7 @@ Read this file only when `QUIET_MODE == false` (the user invoked with `verbose`)
 
 ## Phase 2 Verbose — post Codex review to the PR
 
-**CRITICAL:** Post the review to the PR BEFORE starting Phase 3. Do not begin addressing feedback until the review is visible on the PR. Human reviewers need to follow along. Sequence is always: Codex reviews → post → Claude responds.
+Post the review to the PR before starting Phase 3, so human reviewers can follow along. Sequence is always: Codex reviews → post → Claude responds.
 
 ### Step 1: Get the PR's latest commit SHA
 
